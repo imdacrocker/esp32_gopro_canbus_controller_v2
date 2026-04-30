@@ -1,7 +1,6 @@
 #include "ble_core_internal.h"
 
 #include "nimble/nimble_port.h"
-#include "nimble/ble_npl.h"
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
 #include "esp_log.h"
