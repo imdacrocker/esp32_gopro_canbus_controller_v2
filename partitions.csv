@@ -1,0 +1,11 @@
+# ESP32 GoPro Controller V2
+# Target: ESP32-S3  |  Flash: 8 MB
+#
+# Bootloader:      0x000000 – 0x007FFF  (32 KB, IDF default)
+# Partition table: 0x008000 – 0x008FFF  (4 KB, IDF default)
+#
+# Name,     Type,  SubType,  Offset,    Size,
+nvs,         data,  nvs,      0x009000,  0x006000,
+phy_init,    data,  phy,      0x00F000,  0x001000,
+factory,     app,   factory,  0x010000,  0x1F0000,
+storage,     data,  spiffs,   0x200000,  0x300000,

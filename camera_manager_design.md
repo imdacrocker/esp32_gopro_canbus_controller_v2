@@ -73,8 +73,11 @@ The values below should be committed in `sdkconfig.defaults` so every developer'
 
 ```
 CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 ```
 
 The custom partition table reserves a 3 MB `storage` partition for the LittleFS web UI assets (§19.1).
@@ -84,7 +87,6 @@ The custom partition table reserves a 3 MB `storage` partition for the LittleFS 
 ```
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_CONTROLLER_ENABLED=y
 
 # Pin NimBLE host and BT controller to core 1 (§4.1)
 CONFIG_BT_NIMBLE_PINNED_TO_CORE_1=y
@@ -105,12 +107,11 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 
 ```
 # Pin WiFi task to core 0, opposite NimBLE (§4.1)
-CONFIG_ESP_WIFI_TASK_CORE_ID_0=y
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 
 # DHCP server
 CONFIG_LWIP_DHCPS=y
-CONFIG_LWIP_DHCPS_LEASE_UNIT=60      # 1-minute units
-CONFIG_LWIP_DHCPS_MAX_NUMBER_OF_CLIENTS=8
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8
 
 ```
 
@@ -118,9 +119,8 @@ CONFIG_LWIP_DHCPS_MAX_NUMBER_OF_CLIENTS=8
 
 ```
 # Web UI server
-CONFIG_HTTPD_TASK_STACK_SIZE=8192
+# HTTPD_TASK_STACK_SIZE and HTTPD_MAX_OPEN_SOCKETS removed in IDF v6 — set via httpd_config_t in http_server_init()
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
-CONFIG_HTTPD_MAX_OPEN_SOCKETS=16    # matches V1; handles concurrent browser + background polls
 
 # HTTPS client (open_gopro_http)
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
@@ -128,24 +128,7 @@ CONFIG_MBEDTLS_TLS_CLIENT=y
 CONFIG_MBEDTLS_HAVE_TIME=y
 ```
 
-### 3.5 LittleFS
-
-```
-CONFIG_LITTLEFS=y
-CONFIG_LITTLEFS_PARTITION_LABEL="storage"
-```
-
-LittleFS is provided via the `joltwallet/littlefs` managed component — declare it in `idf_component.yml` under the `http_server` component.
-
-### 3.6 TWAI / CAN
-
-```
-CONFIG_TWAI_ENABLED=y
-```
-
-The TWAI driver is configured at runtime in `can_manager_init()` (1 Mbps, GPIO 7/6) — see §14.1. No additional sdkconfig is required.
-
-### 3.7 esp_timer
+### 3.5 esp_timer
 
 ```
 # Pin esp_timer task to core 0 alongside WiFi (§4.1)
@@ -153,7 +136,7 @@ CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0=y
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
 ```
 
-### 3.8 Logging
+### 3.6 Logging
 
 ```
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y       # production-quiet at boot
@@ -162,7 +145,7 @@ CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
 CONFIG_LOG_COLORS=y                   # ANSI colors over USB serial
 ```
 
-### 3.9 Coexistence
+### 3.7 Coexistence
 
 ```
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
@@ -170,16 +153,18 @@ CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 Enabled by default when both BLE and WiFi are compiled in. Documented here so it does not get accidentally disabled.
 
-### 3.10 Verification at boot
+### 3.8 Verification at boot
 
 A short utility in `app_main()` (or the first component init) should log the actual core affinity and channel choice on every boot, so a misconfigured sdkconfig is visible immediately rather than as mysterious latency:
 
 ```c
 ESP_LOGI(TAG, "boot: NimBLE core=%d, WiFi core=%d, channel=%d",
          CONFIG_BT_NIMBLE_PINNED_TO_CORE,
-         CONFIG_ESP_WIFI_TASK_CORE_ID,
+         CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0 ? 0 : 1,
          AP_CHANNEL);
 ```
+
+`CONFIG_ESP_WIFI_TASK_CORE_ID` is a Kconfig `choice` name and does not generate a C integer macro. Use the boolean option directly. `CONFIG_BT_NIMBLE_PINNED_TO_CORE` is an explicit `int` config and resolves to 0 or 1 directly. `AP_CHANNEL` is `#define`d in `main.c` (temporarily) and will move to `wifi_manager.h`.
 
 If those numbers ever surprise you on a new build, the `sdkconfig` overrode the defaults — investigate before chasing radio symptoms.
 
@@ -1752,7 +1737,14 @@ The HTTP server is the topmost component in the dependency graph. It owns the `e
 
 `esp_httpd` runs on its own internal task. API handlers are called directly on that task — no additional queue or dispatch task is needed. This is safe because read operations are non-blocking RAM reads, state-setting calls are flag writes, and BLE/WiFi RC operations already return immediately by posting to their own component queues internally.
 
-`esp_httpd` stack size should be set to **8 KB** (`CONFIG_HTTPD_TASK_STACK_SIZE=8192`) — the default 4 KB is tight when building JSON responses containing all camera slots.
+`esp_httpd` stack size and max open sockets are no longer Kconfig symbols in IDF v6 and must be set programmatically in `http_server_init()`:
+
+```c
+httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+config.stack_size      = 8192;   /* default 4 KB is tight when building JSON for all camera slots */
+config.max_open_sockets = 16;    /* matches V1; handles concurrent browser + background polls */
+httpd_start(&server, &config);
+```
 
 ### 20.3 Serving Web Assets
 

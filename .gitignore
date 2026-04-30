@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+/sdkconfig
+/managed_components
+/build
+/.vscode
+/.claude
