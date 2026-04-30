@@ -38,7 +38,7 @@ An ESP32-S3 firmware that acts as a wireless RC controller for up to four GoPro 
   └──────┬──────┘            └──────┬──────┘
          │                          │
   ┌──────▼──────────────────────────▼──────┐
-  │            camera_manager (TODO)        │
+  │            camera_manager               │
   │   per-camera state, NVS slot records   │
   └──────────────────────┬─────────────────┘
                          │
@@ -66,9 +66,10 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 |-----------|--------|-------------|
 | [`wifi_manager`](components/wifi_manager/README.md) | Done | SoftAP with DHCP, MAC spoofing, station tracking |
 | [`ble_core`](components/ble_core/README.md) | Done | NimBLE scan/connect/encrypt/notify/bond management |
+| [`camera_manager`](components/camera_manager) | Done | Slot lifecycle, NVS records, driver vtable, mismatch correction |
+| [`gopro/gopro_model.h`](components/gopro/gopro_model.h) | Done | GoPro model capability helpers |
 | `open_gopro_ble` | TODO | Open GoPro BLE protocol driver |
 | `open_gopro_http` | TODO | Open GoPro HTTPS/COHN driver |
-| `camera_manager` | TODO | Per-camera state machine, NVS persistence |
 | `gopro_wifi_rc` | TODO | RC-emulation driver over WiFi |
 | `can_manager` | TODO | TWAI driver and CAN message RX task |
 

@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "wifi_manager.h"
 #include "ble_core.h"
+#include "camera_manager.h"
 
 static const char *TAG = "main";
 
@@ -25,7 +26,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* TODO: camera_manager_init()    — loads NVS slot records             */
+    camera_manager_init();
+
     /* TODO: open_gopro_http_init()   — registers COHN HTTPS driver        */
     /* TODO: gopro_wifi_rc_init()     — registers RC-emulation driver      */
     /* TODO: open_gopro_ble_init()    — registers BLE callbacks + purges bonds */
