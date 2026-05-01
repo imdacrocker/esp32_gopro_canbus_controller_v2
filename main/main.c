@@ -9,8 +9,17 @@
 #include "open_gopro_ble.h"
 #include "open_gopro_http.h"
 #include "gopro_wifi_rc.h"
+#include "can_manager.h"
 
 static const char *TAG = "main";
+
+/* ---- CAN callbacks ------------------------------------------------------- */
+
+static void on_gps_utc_acquired(uint64_t utc_ms, void *arg)
+{
+    (void)utc_ms; (void)arg;
+    open_gopro_ble_sync_time_all();
+}
 
 /* ---- WiFi station callbacks (§21.3) -------------------------------------- */
 
@@ -65,7 +74,17 @@ void app_main(void)
     /* Starts the NimBLE host task. on_sync fires async and begins scanning. */
     ble_core_init();
 
-    /* TODO: can_manager_init()       — starts TWAI driver and RX task     */
+    /* Wire CAN callbacks before starting the TWAI driver. */
+    can_manager_callbacks_t can_cbs = {
+        .on_logging_state     = NULL,   /* camera_manager handles intent directly */
+        .on_logging_state_arg = NULL,
+        .on_utc_acquired      = on_gps_utc_acquired,
+        .on_utc_acquired_arg  = NULL,
+        .on_rx_frame          = NULL,
+        .on_rx_frame_arg      = NULL,
+    };
+    can_manager_register_callbacks(&can_cbs);
+    can_manager_init();
 
     /* Wire WiFi station events to both RC-emulation and COHN drivers (§21.3).
      * Must be called before wifi_manager_init() so no events are lost. */

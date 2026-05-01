@@ -44,8 +44,8 @@ An ESP32-S3 firmware that acts as a wireless RC controller for up to four GoPro 
                          │
                   ┌──────▼──────┐
                   │ can_manager │
-                  │   (TODO)    │
-                  │ TWAI RX task│
+                  │  TWAI node  │
+                  │   RX task   │
                   └─────────────┘
 ```
 
@@ -54,7 +54,7 @@ An ESP32-S3 firmware that acts as a wireless RC controller for up to four GoPro 
 | Core | Tasks |
 |------|-------|
 | Core 0 | WiFi task, `esp_timer`, HTTP handlers |
-| Core 1 | NimBLE host task, BT controller |
+| Core 1 | NimBLE host task, BT controller, `can_rx` task |
 
 BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio coexistence latency.
 
@@ -71,7 +71,7 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 | [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Done | Discovery, pairing, COHN provisioning, BLE keepalive |
 | [`open_gopro_http`](components/gopro/open_gopro_http) | Done | Open GoPro HTTPS/COHN driver (Hero 9+) |
 | [`gopro_wifi_rc`](components/gopro/gopro_wifi_rc/README.md) | Done | RC-emulation driver over WiFi (Hero 4) |
-| `can_manager` | TODO | TWAI driver and CAN message RX task |
+| [`can_manager`](components/can_manager/README.md) | Done | TWAI node, 0x600/0x602 RX, 0x601 TX at 5 Hz, GPS UTC, timezone NVS |
 
 ---
 
@@ -82,13 +82,14 @@ app_main()
  1. nvs_flash_init()                    // Required for BLE bonding storage
  2. esp_netif_init()
  3. esp_event_loop_create_default()
- 4. camera_manager_init()               // TODO: load NVS slot records
+ 4. camera_manager_init()               // load NVS slot records
  5. open_gopro_http_init()              // register COHN HTTPS driver (Hero 9+)
  6. gopro_wifi_rc_init()                // register RC-emulation driver (Hero 4)
  7. open_gopro_ble_init()               // register BLE callbacks + purge bonds
- 8. ble_core_init()                     // Starts NimBLE host task; on_sync fires async
- 9. can_manager_init()                  // TODO: start TWAI driver and RX task
-10. wifi_manager_set_callbacks(...)     // Wire station-associated/DHCP/disconnected CBs
+ 8. ble_core_init()                     // starts NimBLE host task; on_sync fires async
+ 9. can_manager_register_callbacks(...) // wire GPS UTC → open_gopro_ble_sync_time_all
+ 9. can_manager_init()                  // start TWAI node, RX task, TX timer, watchdog
+10. wifi_manager_set_callbacks(...)     // wire station-associated/DHCP/disconnected CBs
 11. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
 12. wifi_manager_wait_for_ap_ready()    // Block until beacon is on-air
 ```
@@ -101,7 +102,7 @@ app_main()
 
 ### Prerequisites
 
-- [ESP-IDF v5.x](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/)
+- [ESP-IDF v6.0](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/)
 - Target: `esp32s3`
 
 ### Build
