@@ -135,14 +135,14 @@ idf.py flash monitor
 
 ### Web UI
 
-The web UI is served from the `storage` LittleFS partition (3 MB at offset `0x200000`). It is flashed separately from the firmware:
+The web UI source lives in [`web_ui/`](web_ui/) (`index.html`, `style.css`, `app.js`). The CMake build automatically compresses the assets and builds a LittleFS image for the `storage` partition — no separate tooling required.
 
 ```bash
-# Build the filesystem image from the www/ source files first, then:
-parttool.py --port PORT write_partition --partition-name storage --input web_ui.bin
+idf.py build flash        # builds firmware + web UI image, flashes both
+idf.py storage-flash      # re-flash the web UI only (after editing web_ui/ files)
 ```
 
-On first boot with a blank or corrupted storage partition, LittleFS formats automatically. The browser will show a placeholder page until the web UI image is flashed.
+On first boot with a blank or corrupted storage partition, LittleFS formats automatically. The browser will show a placeholder page until the storage partition is flashed.
 
 ### Default Configuration
 

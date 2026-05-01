@@ -1,6 +1,6 @@
 # ESP32 GoPro Controller — V2 Full Redesign
 
-**Status:** Design / Pre-implementation
+**Status:** Implemented
 **Date:** 2026-04-26
 
 ---
@@ -529,7 +529,7 @@ Camera associates with SoftAP (recognises WiFi Remote SSID)
   → WIFI_CAM_READY
 ```
 
-On reconnect, `last_ip` from NVS is used as the initial target since RC-emulation cameras may not request a new DHCP lease. RC-emulation cameras cannot report their own model — the user selects the model from a list in the web UI during the initial pairing flow. `camera_manager_save_slot()` returns `ESP_ERR_INVALID_ARG` if `model == CAMERA_MODEL_UNKNOWN`.
+On reconnect, `last_ip` from NVS is used as the initial target since RC-emulation cameras may not request a new DHCP lease. RC-emulation cameras cannot report their own model — `gopro_wifi_rc_add_camera()` defaults to `CAMERA_MODEL_GOPRO_HERO4_BLACK`; no model picker is present in the web UI. `camera_manager_save_slot()` returns `ESP_ERR_INVALID_ARG` if `model == CAMERA_MODEL_UNKNOWN`.
 
 ### Command Transport Summary
 
@@ -645,7 +645,7 @@ void wifi_manager_set_callbacks(
 );
 ```
 
-`gopro_wifi_rc` registers these callbacks at init. `http_server` does not need them (it queries the station table directly when serving `GET /api/legacy/discovered`).
+`gopro_wifi_rc` registers these callbacks at init. `http_server` does not need them (it queries the station table directly when serving `GET /api/rc/discovered`).
 
 ### 11.7 Public API
 
@@ -678,7 +678,7 @@ void wifi_manager_set_callbacks(
 | Item | Owned by |
 |---|---|
 | HTTP server startup and all `/api/` handlers | `http_server` |
-| `index.html` / web assets | `http_server/www/` |
+| `index.html` / web assets | `web_ui/` (project root) |
 | `GET /api/rc/discovered` handler | `http_server` (reads station table via `wifi_manager_get_connected_stations()`) |
 | RC-emulation camera event routing | `gopro_wifi_rc` (via registered callbacks) |
 | COHN camera event routing | `open_gopro_http` / `open_gopro_ble` (via registered callbacks) |
@@ -1683,24 +1683,35 @@ No active scanning. The SoftAP handles discovery by virtue of the camera connect
 
 ### 19.1 Storage
 
-The project's existing partition table already reserves a 3MB LittleFS partition (`storage`). The current approach of embedding `index.html` via `EMBED_TXTFILES` is replaced by serving files from this partition.
+The project's existing partition table already reserves a 3MB LittleFS partition (`storage`). Web UI source files live in `web_ui/` at the project root; the LittleFS image (`build/storage.bin`) is generated automatically during `idf.py build` and flashed as part of `idf.py flash`.
 
 Benefits:
-- Web UI can be flashed independently from firmware (`idf.py -p PORT littlefs-flash`).
+- Web UI can be re-flashed independently from firmware (`idf.py storage-flash`).
 - Browser can cache JS and CSS separately from the HTML shell.
 - Pre-compressed assets reduce transfer size significantly on the SoftAP link.
-- `http_server` has no build-time dependency on the `www/` source files.
 
-### 19.2 File layout on device
+### 19.2 File layout
 
+Source files (checked in to `web_ui/`):
+```
+web_ui/
+  index.html        HTML shell
+  style.css         Stylesheet
+  app.js            Application logic
+  compress.py       Build helper — called by CMake to copy + gzip assets
+```
+
+On-device layout (`/www/` on LittleFS):
 ```
 /www/
-  index.html        Minimal HTML shell — loads app.js and style.css
-  app.js.gz         Pre-compressed at build time
-  style.css.gz      Pre-compressed at build time
+  index.html        Copied as-is
+  style.css         Plain copy
+  style.css.gz      Pre-compressed (gzip -9); served when Accept-Encoding: gzip present
+  app.js            Plain copy
+  app.js.gz         Pre-compressed; served when Accept-Encoding: gzip present
 ```
 
-A CMake custom command in `http_server/CMakeLists.txt` runs `gzip -9` on the source files as part of the build, producing the `.gz` variants for the filesystem image.
+`compress.py` is invoked by a CMake custom target (`web_ui_stage`) defined in the root `CMakeLists.txt`. `littlefs_create_partition_image()` (from `joltwallet__littlefs`) then builds `build/storage.bin` from the staged output and wires it into `idf.py flash` via `FLASH_IN_PROJECT`.
 
 ### 19.3 Serving compressed assets
 
@@ -1715,9 +1726,9 @@ Cache-Control: max-age=3600
 
 This also resolves the observed iOS loading issues. iOS Safari requires an accurate `Content-Length` header and handles chunked transfer encoding poorly from embedded HTTP servers. Serving a known-size pre-compressed file with explicit headers satisfies both requirements.
 
-### 19.4 `http_server` component location
+### 19.4 Web UI source location
 
-`www/` source files and the LittleFS image generation move from `wifi_manager/` to `http_server/`. `wifi_manager` retains no web assets.
+Web UI source files live in `web_ui/` at the project root (not inside any component). LittleFS image generation is wired into the root `CMakeLists.txt` so it runs as part of every build. `wifi_manager` and `http_server` have no build-time dependency on the web UI source.
 
 ---
 
@@ -1759,8 +1770,6 @@ All asset responses include `Cache-Control: max-age=3600`.
 ### 20.4 API Handlers
 
 All handlers follow the same structure: parse request -> call one component API -> write JSON response. The full endpoint contract lives in **`web_ui_spec.md`**, which is the canonical reference for the HTTP API contract. This section only maps endpoints to the component each handler calls into.
-
-> **Naming note for V2 implementation:** `web_ui_spec.md` flags two endpoint name renames pending in V2 — `legacy_wifi` -> `rc_emulation` (camera type field), and `/api/legacy/discovered` -> `/api/rc/discovered` / `/api/legacy/add` -> `/api/rc/add`. The table below uses the V2 names.
 
 | Endpoint | Component called |
 |---|---|
