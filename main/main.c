@@ -7,6 +7,7 @@
 #include "ble_core.h"
 #include "camera_manager.h"
 #include "open_gopro_ble.h"
+#include "open_gopro_http.h"
 
 static const char *TAG = "main";
 
@@ -29,7 +30,8 @@ void app_main(void)
 
     camera_manager_init();
 
-    /* TODO: open_gopro_http_init()   — registers COHN HTTPS driver        */
+    open_gopro_http_init();
+
     /* TODO: gopro_wifi_rc_init()     — registers RC-emulation driver      */
 
     /* Registers BLE callbacks with ble_core and purges stale bonds.

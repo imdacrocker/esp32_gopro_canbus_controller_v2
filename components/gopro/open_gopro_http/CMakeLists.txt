@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "driver.c"
+        "http_client.c"
+        "status.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "."
+        ".."
+    REQUIRES
+        camera_manager
+        open_gopro_ble
+        esp_http_client
+        esp_timer
+        freertos
+        nvs_flash
+        esp_wifi
+)

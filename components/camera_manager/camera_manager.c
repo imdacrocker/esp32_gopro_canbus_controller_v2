@@ -324,10 +324,16 @@ void camera_manager_on_wifi_disconnected(int slot)
     stop_poll_timer(slot);
 
     lock();
-    s_slots[slot].wifi_status       = WIFI_CAM_NONE;
-    s_slots[slot].ip_addr           = 0;
+    const camera_driver_t *drv     = s_slots[slot].driver;
+    void                  *drv_ctx = s_slots[slot].driver_ctx;
+    s_slots[slot].wifi_status         = WIFI_CAM_NONE;
+    s_slots[slot].ip_addr             = 0;
     s_slots[slot].grace_period_active = false;
     unlock();
+
+    if (drv && drv->on_wifi_disconnected) {
+        drv->on_wifi_disconnected(drv_ctx);
+    }
 
     ESP_LOGI(TAG, "slot %d: wifi disconnected", slot);
 }
@@ -336,10 +342,22 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip)
 {
     int slot = camera_manager_find_by_mac(mac);
     if (slot < 0) return;
+
     lock();
     s_slots[slot].last_ip = ip;
+    const camera_driver_t *drv     = NULL;
+    void                  *drv_ctx = NULL;
+    if (s_slots[slot].wifi_status == WIFI_CAM_CONNECTED && s_slots[slot].driver) {
+        drv     = s_slots[slot].driver;
+        drv_ctx = s_slots[slot].driver_ctx;
+    }
     unlock();
+
     ESP_LOGD(TAG, "slot %d: last_ip updated", slot);
+
+    if (drv && drv->on_wifi_associated) {
+        drv->on_wifi_associated(drv_ctx, ip);
+    }
 }
 
 /* ================================================================

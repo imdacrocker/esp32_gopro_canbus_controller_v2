@@ -17,6 +17,20 @@ struct camera_driver {
     void                       (*teardown)(void *ctx);
     /* nullable — notifies driver of new slot index after compaction (§20.5) */
     void                       (*update_slot_index)(void *ctx, int new_slot);
+    /*
+     * nullable — called from camera_manager_on_station_ip() when a camera
+     * joins the SoftAP with a known IP while wifi_status == WIFI_CAM_CONNECTED
+     * (i.e. BLE provisioning is done).  Driver should spawn a probe task and
+     * call camera_manager_on_wifi_connected() on success.
+     * Must not block — called on the wifi_manager event task.
+     */
+    void                       (*on_wifi_associated)(void *ctx, uint32_t ip);
+    /*
+     * nullable — called from camera_manager_on_wifi_disconnected() when the
+     * camera leaves the SoftAP.  Driver should stop any in-flight HTTP work.
+     * Must not block.
+     */
+    void                       (*on_wifi_disconnected)(void *ctx);
 };
 
 /* ---- Public slot info struct (§9) ---- */
