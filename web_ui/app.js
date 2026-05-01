@@ -444,7 +444,7 @@ document.getElementById('results').addEventListener('click', e => {
     const btn = e.target.closest('.pair-this-btn');
     if (!btn) return;
     const addr      = btn.dataset.addr;
-    const addr_type = btn.dataset.addrType;
+    const addr_type = parseInt(btn.dataset.addrType, 10);
 
     if (scanning) cancelScan();
     document.getElementById('results').innerHTML = '';
