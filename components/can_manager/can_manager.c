@@ -347,3 +347,29 @@ int8_t can_manager_get_tz_offset(void)
 {
     return s_tz_offset;
 }
+
+esp_err_t can_manager_set_manual_utc_ms(uint64_t utc_ms)
+{
+    if (utc_ms < UTC_MIN_VALID_MS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_utc_mutex, portMAX_DELAY);
+    if (s_utc.valid) {
+        xSemaphoreGive(s_utc_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_utc.valid          = true;
+    s_utc.acquired_fired = true;
+    s_utc.last_utc_ms    = utc_ms;
+    s_utc.last_esp_us    = esp_timer_get_time();
+    xSemaphoreGive(s_utc_mutex);
+
+    /* Fire the one-time callback — same path as a real GPS acquisition. */
+    if (s_cbs.on_utc_acquired) {
+        s_cbs.on_utc_acquired(utc_ms, s_cbs.on_utc_acquired_arg);
+    }
+
+    ESP_LOGI(TAG, "manual UTC set: %llu ms", (unsigned long long)utc_ms);
+    return ESP_OK;
+}

@@ -1,3 +1,6 @@
 ## IDF Component Manager Manifest File
 dependencies:
+  idf: ">=6.0"
   joltwallet/littlefs: "~=1.20.0"
+  espressif/cjson:
+    version: ">=1.7.18"

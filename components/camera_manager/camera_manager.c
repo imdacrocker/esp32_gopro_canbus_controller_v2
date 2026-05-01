@@ -605,6 +605,123 @@ esp_err_t camera_manager_remove_slot(int slot)
 }
 
 /* ================================================================
+ * Slot reordering (§20.6)
+ * ================================================================ */
+
+/*
+ * NVS key used by open_gopro_ble to store COHN credentials.
+ * camera_manager copies this blob when reordering slots so credentials
+ * follow their camera to the new index.
+ */
+#define NVS_KEY_GOPRO_COHN  "gopro_cohn"
+
+esp_err_t camera_manager_reorder_slots(const int *new_order, int count)
+{
+    if (!new_order || count <= 0 || count > CAMERA_MAX_SLOTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Validate indices and check connectivity. */
+    lock();
+    for (int i = 0; i < count; i++) {
+        int src = new_order[i];
+        if (src < 0 || src >= s_slot_count) {
+            unlock();
+            return ESP_ERR_INVALID_ARG;
+        }
+        camera_slot_t *sl = &s_slots[src];
+        if (sl->wifi_status == WIFI_CAM_READY ||
+            sl->ble_status  == CAM_BLE_CONNECTED) {
+            unlock();
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    unlock();
+
+    /* Stop all poll timers for affected slots before touching RAM. */
+    for (int i = 0; i < count; i++) {
+        stop_poll_timer(new_order[i]);
+    }
+
+    /* Build the permuted RAM snapshot. */
+    camera_slot_t tmp[CAMERA_MAX_SLOTS];
+    lock();
+    for (int i = 0; i < count; i++) {
+        tmp[i] = s_slots[new_order[i]];
+    }
+
+    /* Copy permutation back into the live slot array. */
+    for (int i = 0; i < count; i++) {
+        s_slots[i] = tmp[i];
+        if (s_slots[i].driver && s_slots[i].driver->update_slot_index) {
+            s_slots[i].driver->update_slot_index(s_slots[i].driver_ctx, i);
+        }
+    }
+    unlock();
+
+    /*
+     * Read all gopro_cohn blobs from their ORIGINAL positions BEFORE any NVS
+     * erasure — if we erased first, overlapping permutations would destroy
+     * source data before we had a chance to copy it.
+     */
+    uint8_t *cohn_blobs[CAMERA_MAX_SLOTS] = {0};
+    size_t   cohn_sizes[CAMERA_MAX_SLOTS] = {0};
+
+    for (int i = 0; i < count; i++) {
+        int src = new_order[i];
+        if (src == i) continue;   /* no-op slot — skip */
+        char ns[16];
+        nvs_namespace(src, ns, sizeof(ns));
+        nvs_handle_t h;
+        if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) continue;
+        size_t sz = 0;
+        if (nvs_get_blob(h, NVS_KEY_GOPRO_COHN, NULL, &sz) == ESP_OK && sz > 0) {
+            cohn_blobs[i] = malloc(sz);
+            if (cohn_blobs[i]) {
+                if (nvs_get_blob(h, NVS_KEY_GOPRO_COHN,
+                                 cohn_blobs[i], &sz) == ESP_OK) {
+                    cohn_sizes[i] = sz;
+                } else {
+                    free(cohn_blobs[i]);
+                    cohn_blobs[i] = NULL;
+                }
+            }
+        }
+        nvs_close(h);
+    }
+
+    /* Rewrite camera records at their new indices. */
+    for (int i = 0; i < count; i++) {
+        char ns[16];
+        nvs_namespace(i, ns, sizeof(ns));
+        nvs_handle_t h;
+        if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_erase_all(h);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        save_slot_to_nvs(i);
+    }
+
+    /* Write the pre-read gopro_cohn blobs to their new destination indices. */
+    for (int i = 0; i < count; i++) {
+        if (!cohn_blobs[i]) continue;
+        char ns[16];
+        nvs_namespace(i, ns, sizeof(ns));
+        nvs_handle_t h;
+        if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_blob(h, NVS_KEY_GOPRO_COHN, cohn_blobs[i], cohn_sizes[i]);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        free(cohn_blobs[i]);
+    }
+
+    ESP_LOGI(TAG, "slots reordered (%d entries)", count);
+    return ESP_OK;
+}
+
+/* ================================================================
  * ble_core callbacks (§12.9)
  * ================================================================ */
 

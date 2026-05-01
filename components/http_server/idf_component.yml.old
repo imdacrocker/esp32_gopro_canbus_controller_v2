@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=6.0"
+  espressif/cjson:
+    version: ">=1.7.18"

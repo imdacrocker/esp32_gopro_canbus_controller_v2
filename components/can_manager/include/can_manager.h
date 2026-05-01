@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 /* ---- Logging state (§14.2) ----------------------------------------------- */
 
@@ -74,3 +75,14 @@ bool can_manager_get_utc_ms(uint64_t *out_ms);
  */
 void   can_manager_set_tz_offset(int8_t hours);
 int8_t can_manager_get_tz_offset(void);
+
+/*
+ * Manually set the system time from the web UI (POST /api/settings/datetime).
+ * Only accepted when GPS time has not yet been acquired (gps_valid == false).
+ * On success, fires the on_utc_acquired callback exactly as a real GPS frame
+ * would, triggering time sync to all connected cameras.
+ *
+ * Returns ESP_ERR_INVALID_STATE if GPS time is already valid.
+ * Returns ESP_ERR_INVALID_ARG  if utc_ms is implausibly small.
+ */
+esp_err_t can_manager_set_manual_utc_ms(uint64_t utc_ms);

@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "driver.c"
+        "api_cameras.c"
+        "api_rc.c"
+        "api_settings.c"
+        "api_system.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "."
+        "${CMAKE_CURRENT_SOURCE_DIR}/../gopro"
+    REQUIRES
+        camera_manager
+        can_manager
+        wifi_manager
+        open_gopro_ble
+        gopro_wifi_rc
+        esp_http_server
+        joltwallet__littlefs
+        espressif__cjson
+        lwip
+        nvs_flash
+        freertos
+)

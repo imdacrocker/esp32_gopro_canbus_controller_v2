@@ -10,6 +10,7 @@
 #include "open_gopro_http.h"
 #include "gopro_wifi_rc.h"
 #include "can_manager.h"
+#include "http_server.h"
 
 static const char *TAG = "main";
 
@@ -95,4 +96,7 @@ void app_main(void)
     /* Raises the SoftAP — must come after all station callbacks are wired. */
     wifi_manager_init();
     wifi_manager_wait_for_ap_ready();
+
+    /* Mount LittleFS, start esp_httpd, register all /api/ handlers. */
+    http_server_init();
 }
