@@ -32,15 +32,15 @@ An ESP32-S3 firmware that acts as a wireless RC controller for up to four GoPro 
   │ GATT writes │            │ station mgmt│
   └──────┬──────┘            └──────┬──────┘
          │                          │
-  ┌──────▼──────┐            ┌──────▼──────┐
-  │open_gopro_  │            │open_gopro_  │
-  │ ble (TODO)  │            │http (TODO)  │
-  └──────┬──────┘            └──────┬──────┘
-         │                          │
-  ┌──────▼──────────────────────────▼──────┐
-  │            camera_manager               │
-  │   per-camera state, NVS slot records   │
-  └──────────────────────┬─────────────────┘
+  ┌──────▼──────┐     ┌─────────────┼─────────────┐
+  │open_gopro_  │     │open_gopro_  │gopro_wifi_rc│
+  │    ble      │     │    http     │  (Hero4)    │
+  └──────┬──────┘     └──────┬──────┴──────┬──────┘
+         │                   │             │
+  ┌──────▼───────────────────▼─────────────▼──────┐
+  │                  camera_manager                 │
+  │      per-camera state, NVS slot records        │
+  └──────────────────────┬─────────────────────────┘
                          │
                   ┌──────▼──────┐
                   │ can_manager │
@@ -69,8 +69,8 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 | [`camera_manager`](components/camera_manager) | Done | Slot lifecycle, NVS records, driver vtable, mismatch correction |
 | [`gopro/gopro_model.h`](components/gopro/gopro_model.h) | Done | GoPro model capability helpers |
 | [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Done | Discovery, pairing, COHN provisioning, BLE keepalive |
-| `open_gopro_http` | TODO | Open GoPro HTTPS/COHN driver |
-| `gopro_wifi_rc` | TODO | RC-emulation driver over WiFi |
+| [`open_gopro_http`](components/gopro/open_gopro_http) | Done | Open GoPro HTTPS/COHN driver (Hero 9+) |
+| [`gopro_wifi_rc`](components/gopro/gopro_wifi_rc/README.md) | Done | RC-emulation driver over WiFi (Hero 4) |
 | `can_manager` | TODO | TWAI driver and CAN message RX task |
 
 ---
@@ -83,13 +83,14 @@ app_main()
  2. esp_netif_init()
  3. esp_event_loop_create_default()
  4. camera_manager_init()               // TODO: load NVS slot records
- 5. open_gopro_http_init()              // TODO: register COHN HTTPS driver
- 6. gopro_wifi_rc_init()                // TODO: register RC-emulation driver
+ 5. open_gopro_http_init()              // register COHN HTTPS driver (Hero 9+)
+ 6. gopro_wifi_rc_init()                // register RC-emulation driver (Hero 4)
  7. open_gopro_ble_init()               // register BLE callbacks + purge bonds
  8. ble_core_init()                     // Starts NimBLE host task; on_sync fires async
  9. can_manager_init()                  // TODO: start TWAI driver and RX task
-10. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
-11. wifi_manager_wait_for_ap_ready()    // Block until beacon is on-air
+10. wifi_manager_set_callbacks(...)     // Wire station-associated/DHCP/disconnected CBs
+11. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
+12. wifi_manager_wait_for_ap_ready()    // Block until beacon is on-air
 ```
 
 `ble_core_init()` and `wifi_manager_init()` overlap intentionally: NimBLE stack startup is asynchronous, so the AP can be raised while the BLE host is coming up.

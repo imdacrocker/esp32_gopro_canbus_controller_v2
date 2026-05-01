@@ -236,6 +236,29 @@ static void *ctx_create(int slot)
     return ctx;
 }
 
+/* ---- Public API ---------------------------------------------------------- */
+
+/*
+ * Called from main's on_station_disassociated callback for every SoftAP
+ * departure.  Finds the matching COHN slot (if any) and signals its worker
+ * task to stop, mirroring drv_on_wifi_disconnected().  Non-COHN MACs are
+ * silently ignored via the model guard.
+ */
+void open_gopro_http_on_camera_disconnected_by_mac(const uint8_t mac[6])
+{
+    int slot = camera_manager_find_by_mac(mac);
+    if (slot < 0) return;
+    if (!gopro_model_uses_cohn(camera_manager_get_model(slot))) return;
+
+    gopro_http_ctx_t *ctx = &s_ctx[slot];
+    ctx->stop_requested = true;
+    if (ctx->cmd_queue) {
+        gopro_http_cmd_t dummy = HTTP_CMD_STOP_RECORDING;
+        xQueueSend(ctx->cmd_queue, &dummy, 0);
+    }
+    ESP_LOGI(TAG, "slot %d: SoftAP disassociation — stopping worker", slot);
+}
+
 /* ---- Component init ------------------------------------------------------ */
 
 void open_gopro_http_init(void)

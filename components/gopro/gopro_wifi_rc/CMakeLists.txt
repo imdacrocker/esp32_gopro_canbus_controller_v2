@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "driver.c"
+        "connection.c"
+        "command.c"
+        "status.c"
+        "udp.c"
+        "settings.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "."
+        ".."
+    REQUIRES
+        camera_manager
+        wifi_manager
+        esp_timer
+        freertos
+        lwip
+        esp_wifi
+)

@@ -8,8 +8,31 @@
 #include "camera_manager.h"
 #include "open_gopro_ble.h"
 #include "open_gopro_http.h"
+#include "gopro_wifi_rc.h"
 
 static const char *TAG = "main";
+
+/* ---- WiFi station callbacks (§21.3) -------------------------------------- */
+
+static void on_station_associated(const uint8_t mac[6])
+{
+    gopro_wifi_rc_on_station_associated(mac);
+    /* COHN cameras: open_gopro_ble tracks the SoftAP join internally via
+     * RequestGetCOHNStatus polling — no callback needed here. */
+}
+
+static void on_station_disconnected(const uint8_t mac[6])
+{
+    gopro_wifi_rc_on_station_disassociated(mac);           /* RC-emulation path */
+    open_gopro_http_on_camera_disconnected_by_mac(mac);    /* COHN path         */
+    /* Each handler applies its own model-type guard — only the owning driver acts. */
+}
+
+static void on_station_ip_assigned(const uint8_t mac[6], uint32_t ip)
+{
+    camera_manager_on_station_ip(mac, ip);   /* updates last_ip for any matching slot */
+    gopro_wifi_rc_on_station_dhcp(mac, ip);
+}
 
 void app_main(void)
 {
@@ -32,7 +55,8 @@ void app_main(void)
 
     open_gopro_http_init();
 
-    /* TODO: gopro_wifi_rc_init()     — registers RC-emulation driver      */
+    /* Registers RC-emulation driver, starts work/shutter/UDP tasks. */
+    gopro_wifi_rc_init();
 
     /* Registers BLE callbacks with ble_core and purges stale bonds.
      * Must be called before ble_core_init(). */
@@ -42,6 +66,12 @@ void app_main(void)
     ble_core_init();
 
     /* TODO: can_manager_init()       — starts TWAI driver and RX task     */
+
+    /* Wire WiFi station events to both RC-emulation and COHN drivers (§21.3).
+     * Must be called before wifi_manager_init() so no events are lost. */
+    wifi_manager_set_callbacks(on_station_associated,
+                               on_station_disconnected,
+                               on_station_ip_assigned);
 
     /* Raises the SoftAP — must come after all station callbacks are wired. */
     wifi_manager_init();

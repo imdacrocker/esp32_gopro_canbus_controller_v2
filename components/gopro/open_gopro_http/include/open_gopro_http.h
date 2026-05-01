@@ -15,8 +15,18 @@
  */
 #pragma once
 
+#include <stdint.h>
+
 /*
  * Register the COHN HTTPS driver with camera_manager.
  * Must be called after camera_manager_init() and before wifi_manager_init().
  */
 void open_gopro_http_init(void);
+
+/*
+ * Notify the driver that a SoftAP station with the given MAC has disconnected.
+ * Called from main's on_station_disassociated callback for all MACs; the driver
+ * applies its own model-type guard and ignores non-COHN slots.
+ * Must not block — called on the wifi_manager event task.
+ */
+void open_gopro_http_on_camera_disconnected_by_mac(const uint8_t mac[6]);
