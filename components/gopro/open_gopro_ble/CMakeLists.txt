@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "driver.c"
+        "pairing.c"
+        "gatt.c"
+        "readiness.c"
+        "control.c"
+        "cohn.c"
+        "query.c"
+        "notify.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "."
+        ".."
+    REQUIRES
+        bt
+        nvs_flash
+        esp_timer
+        esp_wifi
+        freertos
+        camera_manager
+        ble_core
+)

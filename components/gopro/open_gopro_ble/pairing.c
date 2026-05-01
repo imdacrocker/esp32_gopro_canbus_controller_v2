@@ -1,0 +1,104 @@
+/*
+ * pairing.c — BLE connection lifecycle: connect, encrypt, disconnect.
+ *
+ * All callbacks run on the NimBLE host task (core 1).
+ */
+
+#include <string.h>
+#include "esp_log.h"
+#include "host/ble_hs.h"
+#include "open_gopro_ble_internal.h"
+
+static const char *TAG = "gopro_ble/pair";
+
+/* ---- on_connected -------------------------------------------------------- */
+
+void gopro_on_connected(uint16_t conn_handle, ble_addr_t addr)
+{
+    /* ble_core has already called ble_gap_security_initiate() for us.
+     * Look up whether this is a known camera — if so, record conn_handle. */
+    int slot = camera_manager_find_by_mac(addr.val);
+    if (slot < 0) {
+        /* Unknown camera — will be registered in on_encrypted once bonded. */
+        ESP_LOGI(TAG, "connected unknown addr %02x:%02x:%02x:%02x:%02x:%02x, conn=%d",
+                 addr.val[5], addr.val[4], addr.val[3],
+                 addr.val[2], addr.val[1], addr.val[0], conn_handle);
+        return;
+    }
+
+    gopro_ble_ctx_t *ctx = gopro_ctx_by_slot(slot);
+    if (!ctx) {
+        return;
+    }
+    ctx->conn_handle = conn_handle;
+    camera_manager_on_ble_connected(slot, conn_handle);
+    ESP_LOGI(TAG, "connected slot %d conn=%d", slot, conn_handle);
+}
+
+/* ---- on_encrypted -------------------------------------------------------- */
+
+void gopro_on_encrypted(uint16_t conn_handle, ble_addr_t addr)
+{
+    int slot = camera_manager_find_by_mac(addr.val);
+
+    if (slot < 0) {
+        /* First-time bond: register a new slot. */
+        slot = camera_manager_register_new(addr.val);
+        if (slot < 0) {
+            ESP_LOGW(TAG, "no free slots for new camera, disconnecting conn=%d",
+                     conn_handle);
+            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            return;
+        }
+        ESP_LOGI(TAG, "registered new camera in slot %d conn=%d", slot, conn_handle);
+    }
+
+    gopro_ble_ctx_t *ctx = gopro_ctx_by_slot(slot);
+    if (!ctx) {
+        return;
+    }
+
+    ctx->conn_handle    = conn_handle;
+    ctx->negotiated_mtu = ble_att_mtu(conn_handle);
+    if (ctx->negotiated_mtu == 0) {
+        ctx->negotiated_mtu = BLE_ATT_MTU_DFLT;
+    }
+
+    camera_manager_on_ble_connected(slot, conn_handle);
+
+    ESP_LOGI(TAG, "encrypted slot %d conn=%d mtu=%d",
+             slot, conn_handle, ctx->negotiated_mtu);
+
+    gopro_gatt_start_discovery(ctx);
+}
+
+/* ---- on_disconnected ----------------------------------------------------- */
+
+void gopro_on_disconnected(uint16_t conn_handle, ble_addr_t addr,
+                            uint8_t reason)
+{
+    gopro_ble_ctx_t *ctx = gopro_ctx_by_conn(conn_handle);
+    if (!ctx) {
+        return;
+    }
+
+    int slot = ctx->slot;
+    ESP_LOGI(TAG, "disconnected slot %d conn=%d reason=0x%02x",
+             slot, conn_handle, reason);
+
+    /* Cancel timers before touching ctx fields. */
+    gopro_readiness_cancel(ctx);
+    gopro_keepalive_stop(ctx);
+    gopro_query_free(ctx);
+
+    /* Clear BLE context state. */
+    memset(&ctx->gatt, 0, sizeof(ctx->gatt));
+    ctx->conn_handle       = GOPRO_CONN_NONE;
+    ctx->negotiated_mtu    = 0;
+    ctx->readiness_polling = false;
+    ctx->readiness_retry_count = 0;
+    ctx->cohn_provisioning = false;
+    /* Do NOT clear cohn_pending_utc — user may reconnect before UTC arrives. */
+
+    camera_manager_on_ble_disconnected_by_handle(conn_handle);
+}

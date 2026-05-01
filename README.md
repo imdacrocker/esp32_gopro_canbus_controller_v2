@@ -68,7 +68,7 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 | [`ble_core`](components/ble_core/README.md) | Done | NimBLE scan/connect/encrypt/notify/bond management |
 | [`camera_manager`](components/camera_manager) | Done | Slot lifecycle, NVS records, driver vtable, mismatch correction |
 | [`gopro/gopro_model.h`](components/gopro/gopro_model.h) | Done | GoPro model capability helpers |
-| `open_gopro_ble` | TODO | Open GoPro BLE protocol driver |
+| [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Done | Discovery, pairing, COHN provisioning, BLE keepalive |
 | `open_gopro_http` | TODO | Open GoPro HTTPS/COHN driver |
 | `gopro_wifi_rc` | TODO | RC-emulation driver over WiFi |
 | `can_manager` | TODO | TWAI driver and CAN message RX task |
@@ -85,7 +85,7 @@ app_main()
  4. camera_manager_init()               // TODO: load NVS slot records
  5. open_gopro_http_init()              // TODO: register COHN HTTPS driver
  6. gopro_wifi_rc_init()                // TODO: register RC-emulation driver
- 7. open_gopro_ble_init()               // TODO: register BLE callbacks + purge bonds
+ 7. open_gopro_ble_init()               // register BLE callbacks + purge bonds
  8. ble_core_init()                     // Starts NimBLE host task; on_sync fires async
  9. can_manager_init()                  // TODO: start TWAI driver and RX task
 10. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)

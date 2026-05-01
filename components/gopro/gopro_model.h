@@ -1,7 +1,7 @@
 /*
  * gopro_model.h — GoPro-specific camera_model_t capability helpers (§5.2).
  *
- * These helpers are called ONLY by gopro/* components.  camera_manager never
+ * These helpers are called ONLY by gopro components.  camera_manager never
  * imports this header — all behavioral branching in higher-level components
  * goes through these inline predicates rather than comparing raw model values.
  *

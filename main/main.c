@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include "ble_core.h"
 #include "camera_manager.h"
+#include "open_gopro_ble.h"
 
 static const char *TAG = "main";
 
@@ -30,7 +31,10 @@ void app_main(void)
 
     /* TODO: open_gopro_http_init()   — registers COHN HTTPS driver        */
     /* TODO: gopro_wifi_rc_init()     — registers RC-emulation driver      */
-    /* TODO: open_gopro_ble_init()    — registers BLE callbacks + purges bonds */
+
+    /* Registers BLE callbacks with ble_core and purges stale bonds.
+     * Must be called before ble_core_init(). */
+    open_gopro_ble_init();
 
     /* Starts the NimBLE host task. on_sync fires async and begins scanning. */
     ble_core_init();
