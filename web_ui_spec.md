@@ -93,7 +93,7 @@ All values used verbatim in the current CSS:
 --overlay:  rgba(0, 0, 0, 0.45);
 ```
 
-<!-- TODO: decide whether to adopt CSS custom properties in V2 (currently all values are hardcoded) -->
+<!-- CSS custom properties (`:root { --blue: … }`) should be adopted in V2 for maintainability. -->
 
 ---
 
@@ -165,7 +165,7 @@ padding: 16px 20px
   - Default color: `#888`; hover: `#333`, background `#f0f0f0`
   - Opens the Settings top-sheet modal
 
-<!-- TODO: update title text if desired (e.g. "Camera Controller") -->
+<!-- Title is "GoPro CAN-BUS Controller" — update if desired. -->
 
 ---
 
@@ -277,7 +277,7 @@ Card internal layout:
 .cam-meta  (flex, align-items: baseline, gap: 8px, margin-bottom: 4px)
   .cam-number       "Cam {index}"    0.95rem, weight 600, #222
   .cam-display-name  {cam.name}       0.7rem,  weight 700, UPPERCASE, #999
-  .cam-type-badge   "Legacy WiFi"    (RC-emulation cameras only — see §10.1)
+  .cam-type-badge   "WiFi RC"        (RC-emulation cameras only — see §10.2)
 
 .cam-model-name  {cam.model_name}  0.72rem, #999, margin-bottom 12px
   (omitted when model_name is absent or equals cam.name)
@@ -309,9 +309,7 @@ Card internal layout:
   padding: 2px 6px, border-radius: 4px
   background: #e8f4fd, color: #2980b9, border: 1px solid #aad4f0
 ```
-Shown on camera cards and paired rows when `cam.type === 'legacy_wifi'`.
-
-<!-- TODO: rename 'legacy_wifi' to 'rc_emulation' in V2 API responses -->
+Shown on camera cards and paired rows when `cam.type === 'rc_emulation'`. Badge text: "WiFi RC".
 
 ### 10.3 Per-Camera Shutter Buttons
 
@@ -460,15 +458,13 @@ Title: "PAIR A NEW CAMERA"
 - Status: "Pairing initiated — camera should appear in the list shortly."
 - Result list cleared; new camera will appear on next camera status poll
 
-### 13.2 Section 2 — Add RC-Emulation Camera
+### 13.2 Section 2 — Add WiFi RC Emulation Camera
 
-Title: "ADD LEGACY CAMERA"
+Title: "ADD WIFI RC EMULATION CAMERA"
 
-<!-- TODO: rename section title in V2 (e.g. "Add RC-Emulation Camera") -->
+**Refresh List button** (`#rc-add-btn`): green `#27ae60`
 
-**Refresh List button** (`#legacy-add-btn`): green `#27ae60`
-
-On open and on button click: `GET /api/legacy/discovered`
+On open and on button click: `GET /api/rc/discovered`
 - Returns array of `{ addr, ip }` for SoftAP-connected stations that haven't been identified yet
 - 0 results: "No unidentified devices connected."
 - N results: "{N} device(s) connected — click Add to probe:"
@@ -480,9 +476,9 @@ Each unidentified device renders as a `.found-camera-row`:
 
 **Add flow:**
 1. If IP missing: show "Cannot add — IP address not yet assigned. Wait a moment and click Refresh List." and abort
-2. POST `/api/legacy/add` with `{ addr, ip }`
+2. `POST /api/rc/add` with `{ addr, ip }` — firmware defaults to `HERO4_BLACK`; no model picker in UI
 3. Show "Probing device {addr}… (up to 15 s)", disable UI
-4. After 15s: `GET /api/legacy/discovered`
+4. After 15s: `GET /api/rc/discovered`
    - If addr gone from list → "✅ Camera added — it will appear in the camera list shortly."
    - If addr still in list → "⚠️ Could not identify {addr} as a GoPro camera."
 5. Re-enable button, refresh all lists
@@ -494,10 +490,10 @@ Title: "PAIRED CAMERAS" + count badge (hidden when 0)
 Source: `GET /api/paired-cameras`
 
 Each camera renders as a `.modal-paired-row` (background `#fafafa`, border `#eee`, border-radius 8px):
-- Left: name line (`0.9rem`, weight 600) with optional type badge; meta line (`0.72rem`, `#999`) showing model_name · Cam {index} [· addr if RC-emulation]
+- Left: name line (`0.9rem`, weight 600) with optional type badge (shown when `cam.type === 'rc_emulation'`, text "WiFi RC"); meta line (`0.72rem`, `#999`) showing model_name · Cam {index} [· addr if RC-emulation]
 - Right: "Forget" (BLE) or "Remove" (RC-emulation) button in red `#e74c3c`
 
-**Remove flow:** Confirm dialog → `POST /api/remove-camera` with `{ slot }` → refresh lists. RC-emulation removal also waits 1.5s then refreshes discovered list (async slot free).
+**Remove flow:** Confirm dialog → `POST /api/remove-camera` with `{ slot }` → refresh lists. RC-emulation removal also waits 1.5s then refreshes `GET /api/rc/discovered` (async slot free).
 
 ---
 
@@ -508,7 +504,7 @@ Each camera renders as a `.modal-paired-row` (background `#fafafa`, border `#eee
 | Camera status | 3s | `GET /api/paired-cameras` | Camera cards on main screen |
 | RC status + UTC + auto-control | 2s | `GET /api/logging-state`, `GET /api/utc`, `GET /api/auto-control` | Top two sections |
 | BLE scan results | 1s (during scan only) | `GET /api/cameras`, `GET /api/paired-cameras` | Found cameras list in modal |
-| Modal refresh | 3s (modal open only) | `GET /api/paired-cameras`, `GET /api/legacy/discovered` | Paired list + legacy list in modal |
+| Modal refresh | 3s (modal open only) | `GET /api/paired-cameras`, `GET /api/rc/discovered` | Paired list + RC-emulation list in modal |
 
 All polls fire independently via `setInterval`; no coordination or debouncing between timers.
 
@@ -523,24 +519,19 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | GET | `/api/auto-control` | — | `{ enabled: bool }` | |
 | POST | `/api/auto-control` | `{ enabled: bool }` | `{ enabled: bool }` | |
 | GET | `/api/cameras` | — | `[{ name, addr, addr_type, rssi }]` | BLE scan results |
-| GET | `/api/paired-cameras` | — | `[{ slot, index, name, model_name, type, addr, status }]` | `type`: `"ble"` or `"legacy_wifi"` (<!-- TODO: rename to `"rc_emulation"` -->); `status`: `"disconnected"\|"connected"\|"not_recording"\|"recording"` |
+| GET | `/api/paired-cameras` | — | `[{ slot, index, name, model_name, type, addr, status }]` | `type`: `"ble"` or `"rc_emulation"`; `status`: `"disconnected"\|"connected"\|"not_recording"\|"recording"` |
 | POST | `/api/scan` | — | `{}` | Starts BLE scan |
 | POST | `/api/scan-cancel` | — | `{}` | Cancels BLE scan |
 | POST | `/api/pair` | `{ addr, addr_type }` | `{}` | Initiates BLE pairing |
 | POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types) |
 | POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras |
-| GET | `/api/legacy/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations |
-| POST | `/api/legacy/add` | `{ addr, ip }` | `{}` | Starts async probe |
+| GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations |
+| POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Starts async probe; firmware defaults to `HERO4_BLACK` |
 | POST | `/api/reboot` | — | `{}` or no response | ESP32 may drop connection before responding |
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |
 | GET | `/api/settings/timezone` | — | `{ tz_offset_hours: int }` | |
 | POST | `/api/settings/timezone` | `{ tz_offset_hours: int }` | `{}` | |
 | POST | `/api/settings/datetime` | `{ epoch_ms: number }` | `{}` | Only valid when `gps_valid == false`; sets system time from browser clock; triggers `open_gopro_ble_sync_time_all()` |
-
-<!-- TODO: V2 API changes expected: -->
-<!-- - Rename legacy_wifi → rc_emulation in camera type field -->
-<!-- - Add COHN provisioning status fields to paired-cameras response -->
-<!-- - Possibly add per-camera model_id numeric field for V2 camera_model_t -->
 
 ---
 
@@ -558,13 +549,13 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 
 ---
 
-## 17. Open Items / Known V2 Changes
+## 17. Open Items / Known V2 Decisions
 
-- **Camera type field:** Rename `legacy_wifi` → `rc_emulation` throughout (API + UI badge label "Legacy WiFi" → "WiFi RC")
-- **COHN cameras:** No current UI for provisioning COHN credentials. V2 will need a flow (possibly triggered from the BLE pairing completion, not a separate UI step — but TBD).
-- **Model selection for RC-emulation cameras:** Current UI does not ask the user to select Hero4 Black vs. Hero4 Silver. V2 needs a picker during the "Add RC-Emulation Camera" flow, or an edit action on the paired camera row.
-- **BLE status granularity:** Current cards show four states. V2 camera_manager uses the same four states (`disconnected` / `connected` / `not_recording` / `recording`) — no UI change needed for status badge.
-- **Color palette CSS variables:** V2 should adopt CSS custom properties (`:root { --blue: #2980b9; … }`) for maintainability.
-- **COHN re-provisioning:** No current trigger in the UI. If credentials become stale, user needs a way to re-initiate BLE provisioning from within the paired camera row.
-- **Settings → Device section:** May need additional entries in V2 (e.g. per-camera name edit).
-- **Timezone half-hours:** Current timezone support is whole-hour offsets only. Not a V2 priority but worth noting (e.g. India UTC+5:30 would require `float` or `int` half-hours).
+- **Camera type field:** V2 API uses `"rc_emulation"` (not `"legacy_wifi"`). UI badge text is "WiFi RC". ✅ Resolved.
+- **Model selection for RC-emulation cameras:** Firmware defaults to `HERO4_BLACK`; no model picker in the UI. ✅ Resolved (deferred).
+- **COHN cameras:** No UI for provisioning COHN credentials. V2 may trigger the flow from BLE pairing completion rather than a separate UI step — TBD.
+- **COHN re-provisioning:** No trigger in the UI if credentials become stale. User would need a way to re-initiate BLE provisioning from a paired camera row — TBD.
+- **BLE status granularity:** Four states (`disconnected` / `connected` / `not_recording` / `recording`) match V2 camera_manager — no UI change needed.
+- **Color palette:** V2 should use CSS custom properties (`:root { --blue: #2980b9; … }`) for maintainability.
+- **Settings → Device section:** May need additional entries (e.g. per-camera name edit) — TBD.
+- **Timezone half-hours:** Whole-hour offsets only. Not a V2 priority (e.g. UTC+5:30 would need `float` or half-hour `int`).

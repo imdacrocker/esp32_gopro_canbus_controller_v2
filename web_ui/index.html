@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoPro CAN-BUS Controller</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Page header -->
+<header id="page-header">
+  <h1>GoPro CAN-BUS Controller</h1>
+  <button id="settings-btn" aria-label="Settings">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+</header>
+
+<!-- RaceCapture status -->
+<div class="section-card" id="rc-status-section">
+  <div class="section-title">RaceCapture Status</div>
+  <div id="rc-grid">
+    <div class="rc-cell">
+      <div class="rc-cell-label">Logging</div>
+      <div id="rc-logging-pill" class="rc-value rc-unknown">Unknown</div>
+    </div>
+    <div class="rc-cell">
+      <div class="rc-cell-label">RC Date / Time (Local)</div>
+      <div id="utc-display">
+        <div id="utc-date-line">No GPS</div>
+        <div id="utc-time-line"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Auto-control -->
+<div class="section-card" id="auto-control-section">
+  <div id="auto-control-row">
+    <div class="ac-text">
+      <div class="ac-label">Automatic Control</div>
+      <div class="ac-sub">Cameras will start and stop recording automatically based on the RaceCapture logging status.</div>
+    </div>
+    <div class="toggle-wrap" id="toggle-wrap">
+      <div class="toggle-state" id="toggle-state">On</div>
+      <div class="toggle-track on" id="toggle-track">
+        <div class="toggle-thumb"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Status feedback -->
+<p id="status"></p>
+
+<!-- Camera status -->
+<div class="section-card" id="cam-status-section">
+  <div class="section-title">Camera Status</div>
+  <div id="control-bar" style="display:none">
+    <button id="btn-record-all">Record All</button>
+    <button id="btn-stop-all">Stop All</button>
+  </div>
+  <div id="cam-status-list">
+    <div id="cam-status-loading"><div class="spinner"></div></div>
+    <span id="cam-status-empty" style="display:none">No cameras paired.</span>
+  </div>
+</div>
+
+<!-- Fixed bottom bar -->
+<div id="manage-bar">
+  <button id="manage-btn">+ Add / Manage Cameras</button>
+</div>
+
+<!-- Settings modal (top sheet) -->
+<div class="modal-overlay" id="settings-overlay">
+  <div class="settings-modal">
+    <div class="modal-header">
+      <span class="modal-title">Settings</span>
+      <button class="modal-done-btn" id="settings-done">Done</button>
+    </div>
+
+    <div class="modal-section-title">Device</div>
+
+    <div class="settings-row">
+      <span class="settings-row-label">Time Zone</span>
+      <select class="settings-select" id="tz-select"></select>
+    </div>
+
+    <div class="settings-row" id="datetime-row" style="display:none">
+      <span class="settings-row-label">Set Date &amp; Time</span>
+      <div id="datetime-action">
+        <button class="settings-action-btn" id="datetime-btn">Set from Device</button>
+      </div>
+    </div>
+
+    <button class="settings-reboot-btn" id="reboot-btn">Reboot</button>
+    <button class="settings-reset-btn" id="reset-btn">Factory Reset</button>
+  </div>
+</div>
+
+<!-- Manage cameras modal (bottom sheet) -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="manage-modal">
+    <div class="modal-header">
+      <span class="modal-title">Manage Cameras</span>
+      <button class="modal-done-btn" id="modal-done">Done</button>
+    </div>
+
+    <div id="modal-status"></div>
+
+    <!-- Section 1: BLE pairing -->
+    <div class="modal-section-title">Pair a New Camera</div>
+    <button class="modal-action-btn" id="scan-btn">Scan for Cameras</button>
+    <div id="results"></div>
+
+    <!-- Section 2: WiFi RC Emulation -->
+    <div class="modal-section-title">Add WiFi RC Emulation Camera</div>
+    <button class="modal-action-btn" id="rc-add-btn">Refresh List</button>
+    <div id="rc-results"></div>
+
+    <!-- Section 3: Paired cameras -->
+    <div class="modal-section-title-row">
+      <span class="modal-section-title" style="padding:0">Paired Cameras</span>
+      <span class="modal-count-badge" id="paired-count"></span>
+    </div>
+    <div id="paired-list"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
