@@ -52,10 +52,11 @@
 #define GOPRO_CHR_NET_MGMT_RESP_UUID       GOPRO_UUID128_INIT(0x92)  /* GP-0092 Notify */
 
 /* WiFi AP control (used by gopro_wifi_rc for RC-emulation cameras) */
-#define GOPRO_CHR_WIFI_AP_PWR_UUID         GOPRO_UUID128_INIT(0x01)  /* GP-0001 Write */
+
 #define GOPRO_CHR_WIFI_AP_SSID_UUID        GOPRO_UUID128_INIT(0x02)  /* GP-0002 Read */
 #define GOPRO_CHR_WIFI_AP_PASS_UUID        GOPRO_UUID128_INIT(0x03)  /* GP-0003 Read */
-#define GOPRO_CHR_WIFI_AP_STATE_UUID       GOPRO_UUID128_INIT(0x04)  /* GP-0004 Indicate */
+#define GOPRO_CHR_WIFI_AP_PWR_UUID         GOPRO_UUID128_INIT(0x04)  /* GP-0004 Write */
+#define GOPRO_CHR_WIFI_AP_STATE_UUID       GOPRO_UUID128_INIT(0x05)  /* GP-0005 Read/Indicate */
 
 /* CCCD descriptor UUID (standard BLE) */
 #define BLE_GATT_DSC_CLT_CFG_UUID16  0x2902
