@@ -30,8 +30,11 @@ CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 CONFIG_LWIP_DHCPS=y
 CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8
 
-# Socket budget: 16 (httpd) + 3 (httpd internal) + 2 (gopro_rc UDP) + 4 (COHN TLS clients) = 25
-CONFIG_LWIP_MAX_SOCKETS=25
+# Socket budget: 8 (httpd) + 3 (httpd internal) + 2 (gopro_rc UDP) + 4 (COHN TLS) = 17
+CONFIG_LWIP_MAX_SOCKETS=17
+
+# tcpip_thread stack — default 3072 is too shallow under concurrent httpd+BLE load
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=5120
 
 # Web UI server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

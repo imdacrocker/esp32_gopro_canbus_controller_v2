@@ -10,6 +10,8 @@ let pollTimer            = null;    // 1s BLE scan poll
 let countdownTimer       = null;    // 1s scan countdown display
 let scanSecondsLeft      = 0;
 let modalPairedRefreshTimer = null;
+let cameraStatusTimer    = null;    // 3s camera status poll (paused during BLE scan)
+let topSectionTimer      = null;    // 2s top-section poll (paused during BLE scan)
 
 /* ---- Helpers ------------------------------------------------------------- */
 
@@ -376,6 +378,14 @@ function startScan() {
     btn.classList.add('scanning');
     setModalStatus(`Scanning… ${scanSecondsLeft}s`);
 
+    // Snapshot known-paired addrs so pollScanResults can filter without polling /api/paired-cameras
+    lastPairedAddrs = new Set(lastCameraList.map(c => c.addr));
+
+    // Pause all background polls — reduces concurrent TCP connections while NimBLE is active
+    clearInterval(cameraStatusTimer);       cameraStatusTimer       = null;
+    clearInterval(topSectionTimer);         topSectionTimer         = null;
+    clearInterval(modalPairedRefreshTimer); modalPairedRefreshTimer = null;
+
     apiFetch('POST', '/api/scan').catch(() => {});
 
     pollTimer = setInterval(pollScanResults, 1000);
@@ -404,24 +414,27 @@ function stopScan(cancelled) {
     const btn = document.getElementById('scan-btn');
     btn.textContent = 'Scan for Cameras';
     btn.classList.remove('scanning');
+    setModalStatus(cancelled ? 'Scan cancelled.' : 'Scan complete.');
 
-    // Final poll
-    pollScanResults().then(() => {
-        setModalStatus(cancelled ? 'Scan cancelled.' : 'Scan complete.');
-    });
+    // Resume background polls
+    if (!cameraStatusTimer) cameraStatusTimer = setInterval(refreshCameraStatus, 3000);
+    if (!topSectionTimer)   topSectionTimer   = setInterval(refreshTopSection, 2000);
+    if (!modalPairedRefreshTimer && modalOverlay.classList.contains('open')) {
+        modalPairedRefreshTimer = setInterval(() => {
+            refreshModalPairedCameras();
+            refreshRcDiscovered();
+        }, 3000);
+    }
 }
 
 let lastPairedAddrs = new Set();
 
 function pollScanResults() {
-    return Promise.all([
-        apiFetch('GET', '/api/cameras'),
-        apiFetch('GET', '/api/paired-cameras'),
-    ]).then(([found, paired]) => {
-        lastPairedAddrs = new Set(paired.map(c => c.addr));
-        const unpaired = found.filter(c => !lastPairedAddrs.has(c.addr));
-        renderFoundCameras(unpaired);
-    }).catch(() => {});
+    return apiFetch('GET', '/api/cameras')
+        .then(found => {
+            const unpaired = found.filter(c => !lastPairedAddrs.has(c.addr));
+            renderFoundCameras(unpaired);
+        }).catch(() => {});
 }
 
 function renderFoundCameras(cameras) {
@@ -440,16 +453,38 @@ function renderFoundCameras(cameras) {
     });
 }
 
-document.getElementById('results').addEventListener('click', e => {
+document.getElementById('results').addEventListener('click', async e => {
     const btn = e.target.closest('.pair-this-btn');
     if (!btn) return;
     const addr      = btn.dataset.addr;
     const addr_type = parseInt(btn.dataset.addrType, 10);
 
-    if (scanning) cancelScan();
+    // Stop scan timers first so no more poll requests fire, then resume background polls
+    if (scanning) {
+        scanning = false;
+        clearInterval(pollTimer);
+        clearInterval(countdownTimer);
+        pollTimer = null;
+        countdownTimer = null;
+        const scanBtn = document.getElementById('scan-btn');
+        scanBtn.textContent = 'Scan for Cameras';
+        scanBtn.classList.remove('scanning');
+
+        if (!cameraStatusTimer) cameraStatusTimer = setInterval(refreshCameraStatus, 3000);
+        if (!topSectionTimer)   topSectionTimer   = setInterval(refreshTopSection, 2000);
+        if (!modalPairedRefreshTimer && modalOverlay.classList.contains('open')) {
+            modalPairedRefreshTimer = setInterval(() => {
+                refreshModalPairedCameras();
+                refreshRcDiscovered();
+            }, 3000);
+        }
+    }
+
     document.getElementById('results').innerHTML = '';
     setModalStatus('Pairing initiated — camera should appear in the list shortly.');
 
+    // Cancel the BLE scan first, then pair — avoids 4 concurrent requests to the ESP32
+    await apiFetch('POST', '/api/scan-cancel').catch(() => {});
     apiFetch('POST', '/api/pair', { addr, addr_type }).catch(() => {});
 });
 
@@ -602,5 +637,5 @@ buildTimezoneDropdown();
 refreshTopSection();
 refreshCameraStatus();
 
-setInterval(refreshCameraStatus, 3000);
-setInterval(refreshTopSection, 2000);
+cameraStatusTimer = setInterval(refreshCameraStatus, 3000);
+topSectionTimer   = setInterval(refreshTopSection, 2000);

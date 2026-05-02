@@ -125,6 +125,7 @@ static void do_start_discovery(struct ble_npl_event *ev)
 {
     start_disc_args_t *args = ble_npl_event_get_arg(ev);
     int timeout_ms = args->timeout_ms;
+    ble_npl_event_deinit(ev);
     free(ev);
     free(args);
 
@@ -158,7 +159,7 @@ static void do_start_discovery(struct ble_npl_event *ev)
 
 void ble_core_start_discovery(int timeout_ms)
 {
-    struct ble_npl_event *ev   = malloc(sizeof(*ev));
+    struct ble_npl_event *ev   = calloc(1, sizeof(*ev));
     start_disc_args_t    *args = malloc(sizeof(*args));
     if (!ev || !args) {
         free(ev);
@@ -175,6 +176,7 @@ void ble_core_start_discovery(int timeout_ms)
  * -------------------------------------------------------------------------*/
 static void do_stop_discovery(struct ble_npl_event *ev)
 {
+    ble_npl_event_deinit(ev);
     free(ev);
     if (!s_discovering) {
         return;
@@ -187,7 +189,7 @@ static void do_stop_discovery(struct ble_npl_event *ev)
 
 void ble_core_stop_discovery(void)
 {
-    struct ble_npl_event *ev = malloc(sizeof(*ev));
+    struct ble_npl_event *ev = calloc(1, sizeof(*ev));
     if (!ev) {
         return;
     }
@@ -206,6 +208,7 @@ static void do_connect(struct ble_npl_event *ev)
 {
     connect_args_t *args = ble_npl_event_get_arg(ev);
     ble_addr_t addr = args->addr;
+    ble_npl_event_deinit(ev);
     free(ev);
     free(args);
 
@@ -229,7 +232,7 @@ static void do_connect(struct ble_npl_event *ev)
 
 esp_err_t ble_core_connect_by_addr(const ble_addr_t *addr)
 {
-    struct ble_npl_event *ev   = malloc(sizeof(*ev));
+    struct ble_npl_event *ev   = calloc(1, sizeof(*ev));
     connect_args_t       *args = malloc(sizeof(*args));
     if (!ev || !args) {
         free(ev);

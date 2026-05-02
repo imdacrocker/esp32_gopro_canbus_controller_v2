@@ -37,6 +37,7 @@ static void do_gatt_write(struct ble_npl_event *ev)
                  args->conn_handle, args->attr_handle, rc);
     }
 
+    ble_npl_event_deinit(ev);
     free(ev);
     free(args);
 }
@@ -44,7 +45,7 @@ static void do_gatt_write(struct ble_npl_event *ev)
 esp_err_t ble_core_gatt_write(uint16_t conn_handle, uint16_t attr_handle,
                                const uint8_t *data, uint16_t len)
 {
-    struct ble_npl_event *ev   = malloc(sizeof(*ev));
+    struct ble_npl_event *ev   = calloc(1, sizeof(*ev));
     gatt_write_args_t    *args = malloc(sizeof(*args) + len);
     if (!ev || !args) {
         free(ev);

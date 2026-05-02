@@ -257,13 +257,20 @@ static esp_err_t handler_reorder_cameras(httpd_req_t *req)
 
 static esp_err_t handler_cameras(httpd_req_t *req)
 {
-    gopro_device_t devices[GOPRO_DISC_MAX];
+    /* Heap-allocate the device list — 400 bytes on the httpd task stack is
+     * too close to the stack limit when combined with httpd internals. */
+    gopro_device_t *devices = malloc(GOPRO_DISC_MAX * sizeof(gopro_device_t));
+    if (!devices) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_FAIL;
+    }
     int n = open_gopro_ble_get_discovered(devices, GOPRO_DISC_MAX);
 
     /* Max entry: ~100 bytes; 10 entries + brackets = ~1100. */
     const size_t BUF_SIZE = 1280;
     char *buf = malloc(BUF_SIZE);
     if (!buf) {
+        free(devices);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
         return ESP_FAIL;
     }
@@ -292,6 +299,7 @@ static esp_err_t handler_cameras(httpd_req_t *req)
 
     send_json(req, buf);
     free(buf);
+    free(devices);
     return ESP_OK;
 }
 

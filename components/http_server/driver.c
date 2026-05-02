@@ -143,8 +143,8 @@ void http_server_init(void)
 
     /* Start esp_httpd (§20.2). */
     httpd_config_t config    = HTTPD_DEFAULT_CONFIG();
-    config.stack_size        = 8192;
-    config.max_open_sockets  = 16;
+    config.stack_size        = 12288;
+    config.max_open_sockets  = 8;
     config.max_uri_handlers  = 24;   /* 4 assets + 6 system + 8 cameras + 2 rc + 3 settings = 23 */
     config.max_uri_handlers  = 24;   /* 4 assets + 19 /api/ endpoints */
     config.uri_match_fn      = httpd_uri_match_wildcard;

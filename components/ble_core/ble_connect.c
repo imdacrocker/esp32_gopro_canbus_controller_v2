@@ -179,12 +179,13 @@ static void do_remove_bond(struct ble_npl_event *ev)
     ESP_LOGI(TAG, "bond removed");
 
     free(addr);
+    ble_npl_event_deinit(ev);
     free(ev);
 }
 
 void ble_core_remove_bond(const ble_addr_t *addr)
 {
-    struct ble_npl_event *ev        = malloc(sizeof(*ev));
+    struct ble_npl_event *ev        = calloc(1, sizeof(*ev));
     ble_addr_t           *addr_copy = malloc(sizeof(*addr_copy));
     if (!ev || !addr_copy) {
         free(ev);
