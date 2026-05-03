@@ -71,7 +71,29 @@ void app_main(void)
      * Must be called before ble_core_init(). */
     open_gopro_ble_init();
 
-    /* Starts the NimBLE host task. on_sync fires async and begins scanning. */
+    /* Wire WiFi station events to the RC-emulation driver and camera_manager.
+     * Must be called before wifi_manager_init() so no events are lost. */
+    wifi_manager_set_callbacks(on_station_associated,
+                               on_station_disconnected,
+                               on_station_ip_assigned);
+
+    /* Raises the SoftAP — must come after all station callbacks are wired.
+     *
+     * WiFi MUST come up before ble_core_init() starts the NimBLE controller.
+     * The ESP32 shares one antenna between WiFi and BLE; if BLE begins its
+     * radio-intensive scanning/connection work before the AP has finished
+     * bring-up, the coex scheduler can starve WiFi and the AP never gets
+     * its beacon on air.  Blocking on AP_START gives WiFi the clear window
+     * it needs before BLE engages the coex layer. */
+    wifi_manager_init();
+    wifi_manager_wait_for_ap_ready();
+
+    /* Mount LittleFS, start esp_httpd, register all /api/ handlers.
+     * TCP-only — does not touch the radio, safe to do before BLE. */
+    http_server_init();
+
+    /* Starts the NimBLE host task. on_sync fires async and begins scanning.
+     * Deferred until after the AP beacon is on-air (see comment above). */
     ble_core_init();
 
     /* Wire CAN callbacks before starting the TWAI driver. */
@@ -85,17 +107,4 @@ void app_main(void)
     };
     can_manager_register_callbacks(&can_cbs);
     can_manager_init();
-
-    /* Wire WiFi station events to the RC-emulation driver and camera_manager.
-     * Must be called before wifi_manager_init() so no events are lost. */
-    wifi_manager_set_callbacks(on_station_associated,
-                               on_station_disconnected,
-                               on_station_ip_assigned);
-
-    /* Raises the SoftAP — must come after all station callbacks are wired. */
-    wifi_manager_init();
-    wifi_manager_wait_for_ap_ready();
-
-    /* Mount LittleFS, start esp_httpd, register all /api/ handlers. */
-    http_server_init();
 }
