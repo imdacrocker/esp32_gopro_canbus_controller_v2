@@ -27,13 +27,15 @@ static void on_gps_utc_acquired(uint64_t utc_ms, void *arg)
 
 static void on_station_associated(const uint8_t mac[6])
 {
+    /* Track association state so set_camera_ready can defer probe dispatch
+     * when the camera isn't currently on the AP. */
+    camera_manager_on_station_associated(mac);
     gopro_wifi_rc_on_station_associated(mac);
-    /* COHN cameras: open_gopro_ble tracks the SoftAP join internally via
-     * RequestGetCOHNStatus polling — no callback needed here. */
 }
 
 static void on_station_disconnected(const uint8_t mac[6])
 {
+    camera_manager_on_station_disassociated(mac);
     gopro_wifi_rc_on_station_disassociated(mac);           /* RC-emulation path */
     open_gopro_http_on_camera_disconnected_by_mac(mac);    /* COHN path         */
     /* Each handler applies its own model-type guard — only the owning driver acts. */

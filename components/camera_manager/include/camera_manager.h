@@ -148,6 +148,16 @@ void camera_manager_on_wifi_disconnected(int slot);
  */
 void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip);
 
+/*
+ * Called from the wifi_manager on_station_associated / on_station_disconnected
+ * callbacks.  Tracks whether the camera is currently joined to our SoftAP so
+ * that camera_manager_set_camera_ready() can avoid dispatching on_wifi_associated
+ * with a stale IP when BLE-ready fires while the camera is off the AP.  No
+ * driver dispatch happens here — on_station_ip is responsible for that.
+ */
+void camera_manager_on_station_associated(const uint8_t mac[6]);
+void camera_manager_on_station_disassociated(const uint8_t mac[6]);
+
 /* ----- NVS persistence ----- */
 
 /* Returns ESP_ERR_INVALID_ARG if model == CAMERA_MODEL_UNKNOWN (§6.1). */

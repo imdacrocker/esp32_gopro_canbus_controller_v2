@@ -55,6 +55,11 @@ typedef struct {
     /* WiFi (§7.3) */
     wifi_cam_status_t wifi_status;
     uint32_t          ip_addr;
+    bool              wifi_associated;  /* true between SoftAP station join
+                                           and disassociation events; gates
+                                           set_camera_ready's immediate
+                                           dispatch so we don't probe a
+                                           camera that isn't on the AP yet */
 
     /* Control */
     desired_recording_t    desired_recording;
@@ -317,8 +322,12 @@ void camera_manager_set_camera_ready(int slot, bool ready)
      * finishes (especially the first time, when CreateCert + status poll
      * take several seconds).  In that case on_station_ip ran while
      * wifi_status was still NONE and didn't trigger the driver's probe.
-     * If we're transitioning to CONNECTED and last_ip is already populated,
-     * dispatch on_wifi_associated now so the driver can probe.
+     * If we're transitioning to CONNECTED and last_ip is already populated
+     * AND the camera is currently on our SoftAP, dispatch on_wifi_associated
+     * now so the driver can probe.  If the camera is not currently
+     * associated (e.g. cached-credentials reboot path where BLE-ready fires
+     * before the camera rejoins WiFi), we leave the state as CONNECTED and
+     * let the next on_station_ip event do the dispatch.
      */
     const camera_driver_t *drv     = NULL;
     void                  *drv_ctx = NULL;
@@ -326,7 +335,10 @@ void camera_manager_set_camera_ready(int slot, bool ready)
 
     lock();
     s_slots[slot].wifi_status = ready ? WIFI_CAM_CONNECTED : WIFI_CAM_NONE;
-    if (ready && s_slots[slot].last_ip != 0 && s_slots[slot].driver) {
+    if (ready &&
+        s_slots[slot].last_ip != 0 &&
+        s_slots[slot].wifi_associated &&
+        s_slots[slot].driver) {
         drv     = s_slots[slot].driver;
         drv_ctx = s_slots[slot].driver_ctx;
         ip      = s_slots[slot].last_ip;
@@ -428,7 +440,8 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip)
     if (slot < 0) return;
 
     lock();
-    s_slots[slot].last_ip = ip;
+    s_slots[slot].last_ip         = ip;
+    s_slots[slot].wifi_associated = true;  /* DHCP implies association */
     const camera_driver_t *drv     = NULL;
     void                  *drv_ctx = NULL;
     if (s_slots[slot].wifi_status == WIFI_CAM_CONNECTED && s_slots[slot].driver) {
@@ -442,6 +455,29 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip)
     if (drv && drv->on_wifi_associated) {
         drv->on_wifi_associated(drv_ctx, ip);
     }
+}
+
+void camera_manager_on_station_associated(const uint8_t mac[6])
+{
+    int slot = camera_manager_find_by_mac(mac);
+    if (slot < 0) return;
+    lock();
+    s_slots[slot].wifi_associated = true;
+    unlock();
+    ESP_LOGD(TAG, "slot %d: station associated", slot);
+    /* No driver dispatch here — wait for on_station_ip to deliver a fresh
+     * IP.  If set_camera_ready already ran and last_ip is current, the
+     * upcoming DHCP event will dispatch via on_station_ip. */
+}
+
+void camera_manager_on_station_disassociated(const uint8_t mac[6])
+{
+    int slot = camera_manager_find_by_mac(mac);
+    if (slot < 0) return;
+    lock();
+    s_slots[slot].wifi_associated = false;
+    unlock();
+    ESP_LOGD(TAG, "slot %d: station disassociated", slot);
 }
 
 /* ================================================================
