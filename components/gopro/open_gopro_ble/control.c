@@ -9,6 +9,7 @@
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/control.html
  */
 
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include "esp_log.h"
@@ -98,6 +99,62 @@ int gopro_control_send_set_cam_ctrl(gopro_ble_ctx_t *ctx)
     ESP_LOGI(TAG, "slot %d: → SetCameraControlStatus(EXTERNAL)", ctx->slot);
     return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
                                 k_set_cam_ctrl_pkt, sizeof(k_set_cam_ctrl_pkt));
+}
+
+/* ---- RequestPairingFinish (Network Management) -------------------------- */
+
+/*
+ * Packet layout (variable length, fits in a single GPBS general header):
+ *   [0]   GPBS header (general, len = N)
+ *   [1]   Feature ID 0x03 (NETWORK_MANAGEMENT)
+ *   [2]   Action ID  0x01 (RequestPairingFinish)
+ *   [3]   PB tag 0x08 (field 1 varint)
+ *   [4]   EnumPairingFinishState.SUCCESS = 0x01
+ *   [5]   PB tag 0x12 (field 2 length-delimited)
+ *   [6]   phoneName length L
+ *   [7..] phoneName bytes
+ *
+ * Spec requires phoneName non-empty but states the value has no effect.
+ */
+#define GOPRO_PAIRING_FINISH_PHONE_NAME  "ESP32 Controller"
+
+int gopro_control_send_pairing_finish(gopro_ble_ctx_t *ctx)
+{
+    if (ctx->conn_handle == GOPRO_CONN_NONE) {
+        ESP_LOGW(TAG, "slot %d: PairingFinish skipped — not connected", ctx->slot);
+        return -1;
+    }
+    if (ctx->gatt.nw_mgmt_write == 0) {
+        ESP_LOGI(TAG, "slot %d: PairingFinish skipped — camera has no GP-0091 (older model)",
+                 ctx->slot);
+        return -1;
+    }
+
+    const char *name      = GOPRO_PAIRING_FINISH_PHONE_NAME;
+    uint8_t     name_len  = (uint8_t)strlen(name);
+    uint8_t     payload   = (uint8_t)(2u    /* feature + action */
+                                    + 2u    /* tag + value (result) */
+                                    + 2u    /* tag + len (phoneName) */
+                                    + name_len);
+    if (payload > GPBS_HDR_GENERAL_MAX) {
+        ESP_LOGW(TAG, "slot %d: PairingFinish payload too long (%u)", ctx->slot, payload);
+        return -1;
+    }
+
+    uint8_t pkt[1 + GPBS_HDR_GENERAL_MAX];
+    uint8_t i = 0;
+    pkt[i++] = payload;
+    pkt[i++] = GOPRO_PROTO_FEATURE_NW_MGMT;
+    pkt[i++] = GOPRO_NW_MGMT_ACTION_PAIRING_FINISH;
+    pkt[i++] = GOPRO_PAIRING_FINISH_PB_RESULT_TAG;
+    pkt[i++] = GOPRO_PAIRING_FINISH_STATE_SUCCESS;
+    pkt[i++] = GOPRO_PAIRING_FINISH_PB_NAME_TAG;
+    pkt[i++] = name_len;
+    memcpy(&pkt[i], name, name_len);
+    i = (uint8_t)(i + name_len);
+
+    ESP_LOGI(TAG, "slot %d: -> RequestPairingFinish(SUCCESS, \"%s\")", ctx->slot, name);
+    return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.nw_mgmt_write, pkt, i);
 }
 
 /* ---- SetShutter (start/stop recording) ----------------------------------- */

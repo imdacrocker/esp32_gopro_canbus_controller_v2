@@ -47,6 +47,10 @@
 #define GOPRO_CHR_QUERY_WRITE_UUID         GOPRO_UUID128_INIT(0x76)  /* GP-0076 Write */
 #define GOPRO_CHR_QUERY_RESP_NOTIFY_UUID   GOPRO_UUID128_INIT(0x77)  /* GP-0077 Notify */
 
+/* Network Management channel (carries Feature 0x03 — RequestPairingFinish, etc.) */
+#define GOPRO_CHR_NW_MGMT_WRITE_UUID       GOPRO_UUID128_INIT(0x91)  /* GP-0091 Write */
+#define GOPRO_CHR_NW_MGMT_RESP_NOTIFY_UUID GOPRO_UUID128_INIT(0x92)  /* GP-0092 Notify */
+
 /* CCCD descriptor UUID (standard BLE) */
 #define BLE_GATT_DSC_CLT_CFG_UUID16  0x2902
 
@@ -204,10 +208,15 @@ static const uint8_t k_gopro_keepalive_pkt[4] = {
  * Spec: OpenGoPro protobuf definitions at github.com/gopro/OpenGoPro/protobuf
  */
 #define GOPRO_PROTO_FEATURE_COMMAND       0xF1u  /* RequestSetCameraControlStatus */
+#define GOPRO_PROTO_FEATURE_NW_MGMT       0x03u  /* Network Management (PairingFinish, ...) */
 
 /* COMMAND-feature action IDs (feature 0xF1) */
 #define GOPRO_CMD_ACTION_SET_CAM_CTRL     0x69u  /* RequestSetCameraControlStatus */
 #define GOPRO_CMD_RESP_SET_CAM_CTRL       0xE9u  /* ResponseGeneric */
+
+/* NETWORK-MANAGEMENT-feature action IDs (feature 0x03) */
+#define GOPRO_NW_MGMT_ACTION_PAIRING_FINISH  0x01u  /* RequestPairingFinish */
+#define GOPRO_NW_MGMT_RESP_PAIRING_FINISH    0x81u  /* ResponseGeneric */
 
 /* ---- Protobuf encoding helpers ------------------------------------------ */
 
@@ -228,6 +237,19 @@ static const uint8_t k_gopro_keepalive_pkt[4] = {
  */
 #define GOPRO_CAM_CTRL_PB_STATUS_TAG  0x08u  /* field 1, varint */
 #define GOPRO_CAM_CTRL_EXTERNAL       0x02u
+
+/*
+ * RequestPairingFinish protobuf body:
+ *   field 1 varint: result (EnumPairingFinishState)
+ *   field 2 string: phoneName (must be non-empty per spec)
+ *
+ * EnumPairingFinishState: UNKNOWN=0, SUCCESS=1, FAILED=2.
+ *
+ * Spec: https://gopro.github.io/OpenGoPro/ble/features/network_management.html#set-pairing-state
+ */
+#define GOPRO_PAIRING_FINISH_PB_RESULT_TAG  0x08u  /* field 1, varint */
+#define GOPRO_PAIRING_FINISH_PB_NAME_TAG    0x12u  /* field 2, len-delim */
+#define GOPRO_PAIRING_FINISH_STATE_SUCCESS  0x01u
 
 /* ---- Protobuf response header indices ----------------------------------- */
 

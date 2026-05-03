@@ -34,12 +34,16 @@ typedef struct {
     uint8_t  next_seq;
 } reassembly_t;
 
-/* 3 channels per slot (CMD, SETTINGS, QUERY) */
-static reassembly_t s_asm[CAMERA_MAX_SLOTS][3];
+/* One reassembly buffer per channel per slot (CMD, SETTINGS, QUERY, NW_MGMT). */
+#define GOPRO_CHAN_COUNT  4
+static reassembly_t s_asm[CAMERA_MAX_SLOTS][GOPRO_CHAN_COUNT];
 
 static reassembly_t *get_asm(gopro_ble_ctx_t *ctx, gopro_channel_t chan)
 {
     if (ctx->slot < 0 || ctx->slot >= CAMERA_MAX_SLOTS) {
+        return NULL;
+    }
+    if ((int)chan < 0 || (int)chan >= GOPRO_CHAN_COUNT) {
         return NULL;
     }
     return &s_asm[ctx->slot][(int)chan];
@@ -80,9 +84,10 @@ static uint8_t parse_generic_result(const uint8_t *body, uint16_t len)
 }
 
 /*
- * Protobuf feature response on the cmd channel: [feature_id, action_id, body...].
- * Currently we only care about Feature 0xF1 / Action 0xE9 (SetCameraControlStatus
- * ResponseGeneric).
+ * Protobuf feature response: [feature_id, action_id, body...].
+ *
+ * Feature 0xF1 (COMMAND) responses arrive on the cmd channel.
+ * Feature 0x03 (NETWORK MANAGEMENT) responses arrive on the nw_mgmt channel.
  */
 static void dispatch_proto_resp(gopro_ble_ctx_t *ctx,
                                  const uint8_t *data, uint16_t len)
@@ -103,6 +108,13 @@ static void dispatch_proto_resp(gopro_ble_ctx_t *ctx,
         return;
     }
 
+    if (feature_id == GOPRO_PROTO_FEATURE_NW_MGMT &&
+        action_id  == GOPRO_NW_MGMT_RESP_PAIRING_FINISH) {
+        uint8_t result = parse_generic_result(body, body_len);
+        ESP_LOGI(TAG, "slot %d: PairingFinish ack result=%u", ctx->slot, result);
+        return;
+    }
+
     ESP_LOGD(TAG, "slot %d: unhandled proto resp feat=0x%02x act=0x%02x",
              ctx->slot, feature_id, action_id);
 }
@@ -115,10 +127,15 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
     }
 
     /*
-     * Protobuf feature responses arrive on the cmd channel (GP-0073) for
-     * feature 0xF1.  Detect by the feature_id at byte 0 — it lies outside
-     * the value space used by TLV command IDs.
+     * Protobuf feature responses arrive on the cmd channel (feature 0xF1) and
+     * the nw_mgmt channel (feature 0x03).  On the cmd channel we detect by
+     * byte 0; on nw_mgmt every response is protobuf so we route unconditionally.
      */
+    if (chan == GOPRO_CHAN_NW_MGMT) {
+        dispatch_proto_resp(ctx, data, len);
+        return;
+    }
+
     uint8_t b0 = data[0];
     if (b0 == GOPRO_PROTO_FEATURE_COMMAND) {
         dispatch_proto_resp(ctx, data, len);
@@ -158,6 +175,10 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         } else {
             ESP_LOGD(TAG, "slot %d: query resp len=%d", ctx->slot, len);
         }
+        break;
+
+    case GOPRO_CHAN_NW_MGMT:
+        /* Handled above. */
         break;
     }
 }

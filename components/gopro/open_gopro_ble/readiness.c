@@ -231,6 +231,12 @@ static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
      * before the SetCameraControlStatus handshake. */
     gopro_keepalive_start(ctx);
 
+    /* Tell the camera the initial pairing flow is complete — clears the
+     * on-screen pairing prompt on supported models (Hero11 Mini / Hero12 /
+     * Hero13 / Max 2 / Lit Hero).  Fire-and-forget; older models without a
+     * Network Management characteristic skip this internally. */
+    gopro_control_send_pairing_finish(ctx);
+
     send_set_cam_ctrl(ctx);
 }
 

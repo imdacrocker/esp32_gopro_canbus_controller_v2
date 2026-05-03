@@ -128,9 +128,11 @@ static int scan_event_cb(struct ble_gap_event *event, void *arg)
 void start_scan_if_needed(void)
 {
     if (s_connecting || s_discovering) {
+        ESP_LOGI(TAG, "camera is connecting, skipping background scan");
         return;
     }
     if (g_cbs.has_disconnected_cameras && !g_cbs.has_disconnected_cameras()) {
+        ESP_LOGI(TAG, "no disconnected cameras, skipping background scan");
         return;
     }
 
@@ -142,8 +144,10 @@ void start_scan_if_needed(void)
         .filter_policy     = 0,   /* no HW whitelist; is_known_addr filters in SW */
         .limited           = 0,
         .passive           = 1,
-        .filter_duplicates = 0,   /* must detect re-appearance after a gap */
+        .filter_duplicates = 1,   /* Filter duplicates.  Since this scan is forever, it will eventually timeout and re-find cameras */
     };
+
+    ESP_LOGI(TAG, "starting background scan..");
 
     int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER, &params,
                           scan_event_cb, NULL);

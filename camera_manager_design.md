@@ -822,7 +822,7 @@ camera_manager_set_desired_recording_all(desired_recording_t intent);
 /* intent is DESIRED_RECORDING_START or DESIRED_RECORDING_STOP based on the frame payload */
 ```
 
-This is intentionally idempotent — set on every frame, not only on transitions. A re-stated `DESIRED_RECORDING_START` while every camera is already `CAMERA_RECORDING_ACTIVE` produces no output (the mismatch loop in §13.4 has nothing to correct). The reason for setting on every frame instead of only on transitions is robustness against missed transitions:
+This call is intentionally idempotent — set on every frame, not only on transitions. The function compares the new intent against each slot's previously stored value: only slots that actually transition are dispatched (see §13.3a). A re-stated `DESIRED_RECORDING_START` while every camera already has `desired_recording == DESIRED_RECORDING_START` produces no output, no log line, and no BLE/HTTP traffic. The reason for setting on every frame instead of only on transitions is robustness against missed transitions:
 
 - If the ESP32 reboots mid-race, the first `0x600` frame after boot re-establishes the correct intent without depending on transition detection.
 - If a single `0x600` frame is dropped on the bus, the next frame reasserts the intent — no harm done.
@@ -836,24 +836,61 @@ When automatic control is disabled, CAN frames do not modify `desired_recording`
 camera_manager_set_desired_recording_slot(int slot, desired_recording_t intent);
 ```
 
-The UI must supply `DESIRED_RECORDING_START` or `DESIRED_RECORDING_STOP`; it may not set `UNKNOWN`. Once the UI sets an intent, the mismatch loop activates for that slot.
+The UI must supply `DESIRED_RECORDING_START` or `DESIRED_RECORDING_STOP`; it may not set `UNKNOWN`. The new intent is dispatched immediately if the slot is `WIFI_CAM_READY` (§13.3a); otherwise the mismatch loop picks it up once the slot becomes ready (§13.4).
 
 ### 13.2.1 Reboot-mid-race recovery
 
-The combination of "set on every CAN frame" and the per-camera status poll provides automatic recovery from an ESP32 reboot during an active recording session. After reboot:
+The combination of "set on every CAN frame", the immediate-dispatch path (§13.3a), and the per-camera status poll provides automatic recovery from an ESP32 reboot during an active recording session. After reboot:
 
 1. `desired_recording` resets to `DESIRED_RECORDING_UNKNOWN` on every slot (§13.1). No shutter commands are sent until intent is established.
 2. Cameras and CAN come back online over the next several seconds.
 3. The first `0x600` frame received sets `desired_recording = DESIRED_RECORDING_START` on all slots if RaceCapture is still in the `LOGGING` state.
-4. On the next status poll for each camera, the mismatch loop sees `DESIRED_RECORDING_START` against `CAMERA_RECORDING_IDLE` (cameras are not recording immediately after the ESP32 reboot — they had no command to start) and issues `start_recording()`.
+4. For each slot that is already `WIFI_CAM_READY` at that moment, the immediate-dispatch path (§13.3a) issues `start_recording()` synchronously inside the `set_desired_recording_all()` call. For slots not yet ready, the mismatch poll (§13.4) catches them once `WIFI_CAM_READY` is reached and `CAMERA_RECORDING_IDLE` is observed.
 
-If the RaceCapture logging state is `NOT_LOGGING` when the ESP32 reboots, intent is set to `DESIRED_RECORDING_STOP` and the mismatch loop does nothing further (cameras are already idle).
+If the RaceCapture logging state is `NOT_LOGGING` when the ESP32 reboots, intent is set to `DESIRED_RECORDING_STOP`. Ready slots receive an immediate `stop_recording()` call (a no-op if the camera is already idle, but cheap); unready slots fall to the mismatch poll, which does nothing because the cameras are already idle.
 
 If no `0x600` frame arrives (CAN fault, RaceCapture powered off), `desired_recording` stays `UNKNOWN` indefinitely and no shutter commands are ever issued. The operator must either restore the CAN link or switch to manual control via the web UI.
 
-Total recovery time is bounded by the CAN logging-state heartbeat (continuous at 1+ Hz from RaceCapture) plus one status poll cycle — well under 10 s.
+Total recovery time for ready slots is bounded by the CAN logging-state heartbeat (continuous at 1+ Hz from RaceCapture) plus one BLE/HTTP write — typically under 1 s. For slots that come ready after the first `0x600` frame, recovery is bounded by one additional mismatch-poll interval (default 2 s).
 
-### 13.3 Status polling
+### 13.3 Dispatch overview
+
+`camera_manager` keeps `desired_recording` aligned with the camera's actual state through **two complementary paths**:
+
+| Path | Trigger | Latency | Purpose |
+|------|---------|---------|---------|
+| Immediate dispatch (§13.3a) | `set_desired_recording_*()` call where the new intent differs from the previous value | 0 ms (synchronous in the API call) | Fast shutter response on CAN/UI input |
+| Mismatch correction (§13.3b / §13.4) | Per-slot `esp_timer` firing every 2 s | up to one poll interval | Catches slots that weren't ready at API call time, recovers from missed/dropped commands, corrects state divergence |
+
+Both paths converge on the same vtable entries (`driver->start_recording()` / `stop_recording()`) and share the same `grace_period_active` flag, so they cannot fire duplicate commands at each other.
+
+### 13.3a Immediate dispatch
+
+`camera_manager_set_desired_recording_all()` and `camera_manager_set_desired_recording_slot()` execute the following sequence under the slot mutex:
+
+```
+for each affected slot:
+    if new intent == previous desired_recording → skip (idempotent)
+    update desired_recording = new intent
+    if new intent == DESIRED_RECORDING_UNKNOWN  → skip (no command to issue)
+    if no driver assigned                       → skip (mismatch poll will catch when assigned)
+    if wifi_status != WIFI_CAM_READY            → skip (mismatch poll will catch when ready)
+    snapshot (driver, ctx); set grace_period_active = true
+```
+
+After releasing the mutex, the function calls `driver->start_recording()` or `driver->stop_recording()` on each snapshotted slot. The driver call happens **outside the mutex** to avoid holding the lock across a potentially slow BLE/HTTP write — same discipline as `poll_timer_cb` (§13.4).
+
+Why a real-transition check instead of always dispatching:
+
+- `can_manager` calls `set_desired_recording_all()` on every received `0x600` frame (§13.2). Without the check, this would send a SetShutter to every camera ~1+ Hz indefinitely.
+- The check is "intent transition", not "intent vs. cached status". The cached status may legitimately disagree with `desired_recording` for a short window (e.g. the user just paired a camera that's actually recording while desired is STOP — the mismatch poll will correct it on its next tick).
+
+Why no `cached_status` consultation here:
+
+- The driver's own `start_recording()` already updates `cached_status` optimistically after dispatch. The next mismatch poll therefore sees no work to do.
+- Even if `cached_status` is `UNKNOWN` (e.g. brand-new BLE connection that hasn't yet received its first status notification), we still want the user-initiated command to go out — the command is exactly the thing that will resolve the unknown.
+
+### 13.3b Status polling
 
 Each camera slot, once `WIFI_CAM_READY`, runs a periodic mismatch check driven by a per-slot `esp_timer` in `camera_manager`. The interval is per-model and defined in `gopro_model.h` (default 2 seconds; may be tuned as testing reveals differences).
 
@@ -870,6 +907,8 @@ The per-slot timer is stopped when the slot leaves `WIFI_CAM_READY` and restarte
 
 ### 13.4 Mismatch correction
 
+§13.3a's immediate-dispatch path covers the happy case where the user/CAN changes intent and the camera is ready. The mismatch-correction loop is the **safety net** for everything else: slots that weren't ready when intent changed, dropped commands, cameras whose actual state diverges from what we commanded (e.g. user pressed the physical shutter button on the camera body), and intent established before a slot reaches `WIFI_CAM_READY`.
+
 Immediately after each status update, `camera_manager` compares the driver's cached recording status against `desired_recording`:
 
 ```
@@ -882,7 +921,7 @@ if desired_recording == STOP   && status == ACTIVE            → call driver->s
                                                                  set grace_period_active = true
 ```
 
-**Grace period.** After issuing `start_recording()` or `stop_recording()`, `camera_manager` sets a per-slot `grace_period_active` flag. The flag is cleared on the next poll after it was set, regardless of whether the cache reflects the new state yet. This gives the camera one full poll cycle (≥ status poll interval) for the command to take effect and the cache to update before the mismatch loop fires another correction. Without this grace period a slow camera could receive several duplicate `start_recording` commands while the first is still being processed.
+**Grace period.** After issuing `start_recording()` or `stop_recording()` from **either** path (immediate-dispatch in §13.3a or this poll), `camera_manager` sets a per-slot `grace_period_active` flag. The flag is cleared on the next poll after it was set, regardless of whether the cache reflects the new state yet. This gives the camera one full poll cycle (≥ status poll interval) for the command to take effect and the cache to update before the mismatch loop fires another correction. Without this grace period a slow camera could receive several duplicate `start_recording` commands while the first is still being processed; with it, an immediate-dispatch followed quickly by a poll tick will not double-fire.
 
 The grace period applies only to the next mismatch decision after a correction; it does not block subsequent corrections beyond that. If the second poll still shows mismatch, a fresh correction is sent. This is the self-healing safety net for the "missed shutter" case.
 
@@ -1136,7 +1175,7 @@ drv_get_recording_status(ctx)
   -> return ctx->cached_status   (no lock; single 4-byte enum on Xtensa LX7)
 ```
 
-The optimistic `cached_status` update means the next mismatch poll cycle (§13.3) sees the state we just commanded; the next status poll cycle (within 5 s) confirms or corrects it. If the camera silently refuses the shutter, the optimistic value is overwritten with the real state on the next poll and the mismatch loop will issue a fresh command.
+The optimistic `cached_status` update means the next mismatch poll cycle (§13.3b) sees the state we just commanded; the next status poll cycle (within 5 s) confirms or corrects it. If the camera silently refuses the shutter, the optimistic value is overwritten with the real state on the next poll and the mismatch loop will issue a fresh command.
 
 ### 15.7 Recording Status Poll
 

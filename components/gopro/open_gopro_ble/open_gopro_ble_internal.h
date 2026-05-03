@@ -24,6 +24,8 @@ typedef struct {
     uint16_t settings_resp_notify;
     uint16_t query_write;
     uint16_t query_resp_notify;
+    uint16_t nw_mgmt_write;
+    uint16_t nw_mgmt_resp_notify;
 } gopro_gatt_handles_t;
 
 /* ---- Per-slot driver context (§15.4) ------------------------------------- */
@@ -103,6 +105,15 @@ int  gopro_control_send_set_cam_ctrl(gopro_ble_ctx_t *ctx);
 /* Send SetShutter (TLV 0x01). on=true starts recording, on=false stops. */
 int  gopro_control_send_shutter(gopro_ble_ctx_t *ctx, bool on);
 
+/*
+ * Send RequestPairingFinish (Feature 0x03 / Action 0x01) on the Network
+ * Management channel.  Tells the camera the initial pairing flow is complete,
+ * which clears the on-screen pairing prompt on supported models.  Best-effort:
+ * silently skips if the slot has no nw_mgmt_write handle (older firmware).
+ * Officially supported on Hero11 Mini / Hero12 / Hero13 / Max 2 / Lit Hero.
+ */
+int  gopro_control_send_pairing_finish(gopro_ble_ctx_t *ctx);
+
 /* Start the 3-second periodic BLE keepalive timer. */
 void gopro_keepalive_start(gopro_ble_ctx_t *ctx);
 
@@ -130,6 +141,7 @@ typedef enum {
     GOPRO_CHAN_CMD,       /* cmd_resp_notify  (GP-0073) */
     GOPRO_CHAN_SETTINGS,  /* settings_resp_notify (GP-0075) */
     GOPRO_CHAN_QUERY,     /* query_resp_notify (GP-0077) */
+    GOPRO_CHAN_NW_MGMT,   /* nw_mgmt_resp_notify (GP-0092) */
 } gopro_channel_t;
 
 /*

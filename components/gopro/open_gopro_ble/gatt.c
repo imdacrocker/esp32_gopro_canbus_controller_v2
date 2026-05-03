@@ -48,12 +48,14 @@ typedef struct {
 #define HANDLE_OFF(field)  ((uint16_t)offsetof(gopro_gatt_handles_t, field))
 
 static const chr_map_entry_t k_chr_map[] = {
-    { GOPRO_CHR_CMD_WRITE_UUID,         HANDLE_OFF(cmd_write)            },
-    { GOPRO_CHR_CMD_RESP_NOTIFY_UUID,   HANDLE_OFF(cmd_resp_notify)      },
-    { GOPRO_CHR_SETTINGS_WRITE_UUID,    HANDLE_OFF(settings_write)       },
-    { GOPRO_CHR_SETTINGS_RESP_UUID,     HANDLE_OFF(settings_resp_notify) },
-    { GOPRO_CHR_QUERY_WRITE_UUID,       HANDLE_OFF(query_write)          },
-    { GOPRO_CHR_QUERY_RESP_NOTIFY_UUID, HANDLE_OFF(query_resp_notify)    },
+    { GOPRO_CHR_CMD_WRITE_UUID,           HANDLE_OFF(cmd_write)            },
+    { GOPRO_CHR_CMD_RESP_NOTIFY_UUID,     HANDLE_OFF(cmd_resp_notify)      },
+    { GOPRO_CHR_SETTINGS_WRITE_UUID,      HANDLE_OFF(settings_write)       },
+    { GOPRO_CHR_SETTINGS_RESP_UUID,       HANDLE_OFF(settings_resp_notify) },
+    { GOPRO_CHR_QUERY_WRITE_UUID,         HANDLE_OFF(query_write)          },
+    { GOPRO_CHR_QUERY_RESP_NOTIFY_UUID,   HANDLE_OFF(query_resp_notify)    },
+    { GOPRO_CHR_NW_MGMT_WRITE_UUID,       HANDLE_OFF(nw_mgmt_write)        },
+    { GOPRO_CHR_NW_MGMT_RESP_NOTIFY_UUID, HANDLE_OFF(nw_mgmt_resp_notify)  },
 };
 #define CHR_MAP_LEN  (sizeof(k_chr_map) / sizeof(k_chr_map[0]))
 

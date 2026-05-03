@@ -105,6 +105,7 @@ static void nvs_namespace(int slot, char *buf, size_t len)
 
 void camera_manager_init(void)
 {
+    ESP_LOGI(TAG, "initiating camera manager..");
     s_mutex = xSemaphoreCreateMutex();
     assert(s_mutex != NULL);
 
@@ -531,21 +532,79 @@ camera_can_state_t camera_manager_get_slot_can_state(int slot)
  * Recording intent (§13)
  * ================================================================ */
 
+/*
+ * Immediate-dispatch path: when the desired state actually transitions and the
+ * slot is ready, send the start/stop command now instead of waiting up to one
+ * STATUS_POLL_INTERVAL_MS for the mismatch poll to fire.  The poll remains the
+ * safety net for slots that weren't ready and for state divergence.
+ *
+ * Idempotency: callers (notably can_manager on every 0x600 frame) may invoke
+ * with the same intent repeatedly — we only dispatch on a real transition.
+ *
+ * grace_period_active is set after dispatch so the next poll cycle skips the
+ * slot, mirroring poll_timer_cb's own behaviour after it issues a command.
+ */
 void camera_manager_set_desired_recording_all(desired_recording_t intent)
 {
+    const camera_driver_t *drvs[CAMERA_MAX_SLOTS];
+    void                  *ctxs[CAMERA_MAX_SLOTS];
+    int                    slots[CAMERA_MAX_SLOTS];
+    int                    n = 0;
+
     lock();
     for (int i = 0; i < s_slot_count; i++) {
-        s_slots[i].desired_recording = intent;
+        camera_slot_t *sl = &s_slots[i];
+        if (sl->desired_recording == intent) continue;
+        sl->desired_recording = intent;
+        if (intent == DESIRED_RECORDING_UNKNOWN) continue;
+        if (!sl->driver || sl->wifi_status != WIFI_CAM_READY) continue;
+        drvs[n]  = sl->driver;
+        ctxs[n]  = sl->driver_ctx;
+        slots[n] = i;
+        sl->grace_period_active = true;
+        n++;
     }
     unlock();
+
+    for (int j = 0; j < n; j++) {
+        if (intent == DESIRED_RECORDING_START) {
+            ESP_LOGI(TAG, "slot %d: immediate dispatch — start_recording", slots[j]);
+            drvs[j]->start_recording(ctxs[j]);
+        } else { /* DESIRED_RECORDING_STOP */
+            ESP_LOGI(TAG, "slot %d: immediate dispatch — stop_recording", slots[j]);
+            drvs[j]->stop_recording(ctxs[j]);
+        }
+    }
 }
 
 void camera_manager_set_desired_recording_slot(int slot, desired_recording_t intent)
 {
     if (!slot_valid(slot)) return;
+
+    const camera_driver_t *drv = NULL;
+    void                  *ctx = NULL;
+
     lock();
-    s_slots[slot].desired_recording = intent;
+    camera_slot_t *sl = &s_slots[slot];
+    bool transitioned = (sl->desired_recording != intent);
+    sl->desired_recording = intent;
+    if (transitioned && intent != DESIRED_RECORDING_UNKNOWN
+        && sl->driver && sl->wifi_status == WIFI_CAM_READY) {
+        drv = sl->driver;
+        ctx = sl->driver_ctx;
+        sl->grace_period_active = true;
+    }
     unlock();
+
+    if (drv) {
+        if (intent == DESIRED_RECORDING_START) {
+            ESP_LOGI(TAG, "slot %d: immediate dispatch — start_recording", slot);
+            drv->start_recording(ctx);
+        } else { /* DESIRED_RECORDING_STOP */
+            ESP_LOGI(TAG, "slot %d: immediate dispatch — stop_recording", slot);
+            drv->stop_recording(ctx);
+        }
+    }
 }
 
 bool camera_manager_get_auto_control(void) { return s_auto_control; }
