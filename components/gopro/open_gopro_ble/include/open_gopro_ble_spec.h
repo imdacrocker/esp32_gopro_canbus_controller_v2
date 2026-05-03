@@ -113,16 +113,22 @@
     (1u + 2u + GOPRO_DT_PARAM_DATE_LEN + 2u + GOPRO_DT_PARAM_TIME_LEN)  /* 14 bytes */
 
 /*
- * BLE keepalive
+ * BLE keepalive (Command ID 0x5B)
  * Written to: settings_write (GP-0074)
- * Payload: [0x01, 0x42] — length=1, value=0x42
+ * TLV payload: [GPBS_hdr=3, cmd=0x5B, param_len=1, value=0x42]
  * Period: 3 seconds
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/control.html#keep-alive
  */
-#define GOPRO_CMD_KEEPALIVE           0x42u
+#define GOPRO_CMD_KEEPALIVE           0x5Bu
+#define GOPRO_KEEPALIVE_VALUE         0x42u
 #define GOPRO_KEEPALIVE_PERIOD_MS     3000u
 
-static const uint8_t k_gopro_keepalive_pkt[2] = { 0x01u, GOPRO_CMD_KEEPALIVE };
+static const uint8_t k_gopro_keepalive_pkt[4] = {
+    0x03u,                    /* GPBS header: general, len=3 */
+    GOPRO_CMD_KEEPALIVE,      /* command ID 0x5B */
+    0x01u,                    /* parameter length = 1 */
+    GOPRO_KEEPALIVE_VALUE,    /* parameter value = 0x42 */
+};
 
 /* ---- Query feature: GetStatusValue --------------------------------------- */
 

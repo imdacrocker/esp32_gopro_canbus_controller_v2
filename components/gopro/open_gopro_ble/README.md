@@ -20,7 +20,7 @@ All recording control travels over BLE — there is no HTTPS path. The BLE conne
 - **Recording control** — `SetShutter` TLV 0x01 to GP-0072 (`{0x03, 0x01, 0x01, 0x00|0x01}`).
 - **Recording status poll** — `GetStatusValue` TLV 0x13 on GP-0076 every 5 s, requesting status ID 8 (`system_record_mode_active`). Cached value is exposed via `camera_driver_t.get_recording_status()`.
 - **UTC sync** — `open_gopro_ble_sync_time_all()` sends `SetDateTime` to every connected slot when UTC becomes session-synced (called from `on_utc_acquired`). `SetDateTime` itself is gated on `can_manager_utc_is_session_synced()`, so an NVS-restored boot value cannot push stale time to a camera.
-- **BLE keepalive** — send `0x42` to GP-0074 every 3 s to maintain the link supervision timer and prevent camera auto-sleep.
+- **BLE keepalive** — send TLV cmd `0x5B` with value `0x42` (`{0x03, 0x5B, 0x01, 0x42}`) to GP-0074 every 3 s to maintain the link supervision timer and prevent camera auto-sleep.
 
 ---
 
@@ -89,7 +89,7 @@ All GoPro characteristics use the 128-bit base UUID `b5f9XXXX-aa8d-11e3-9046-000
 |------------|-------------|-----------|---------|
 | `cmd_write` | `0072` | Write | TLV commands + COMMAND-feature protobuf (`SetShutter`, `SetDateTime`, `SetCameraControlStatus`, `GetHardwareInfo`) |
 | `cmd_resp_notify` | `0073` | Notify | Command responses (TLV + protobuf) |
-| `settings_write` | `0074` | Write | Keepalive (0x42) |
+| `settings_write` | `0074` | Write | Keepalive (cmd 0x5B, value 0x42) |
 | `settings_resp_notify` | `0075` | Notify | Settings responses (acknowledged but not acted on) |
 | `query_write` | `0076` | Write | TLV queries (`GetStatusValue`) |
 | `query_resp_notify` | `0077` | Notify | Query responses (status updates) |

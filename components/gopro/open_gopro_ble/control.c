@@ -4,7 +4,7 @@
  *   - SetDateTime (0x0D, TLV)
  *   - SetCameraControlStatus(EXTERNAL) (Feature 0xF1, Action 0x69, protobuf)
  *   - SetShutter (0x01, TLV)
- *   - Keepalive (0x42 to settings_write GP-0074, every 3 s)
+ *   - Keepalive (cmd 0x5B with value 0x42 to settings_write GP-0074, every 3 s)
  *
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/control.html
  */
