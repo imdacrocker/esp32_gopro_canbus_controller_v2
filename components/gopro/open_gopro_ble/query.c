@@ -50,8 +50,30 @@ static reassembly_t *get_asm(gopro_ble_ctx_t *ctx, gopro_channel_t chan)
 /* Forward declarations from readiness.c and cohn.c */
 extern void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
                                          const uint8_t *data, uint16_t len);
-extern void gopro_cohn_on_response(gopro_ble_ctx_t *ctx, uint8_t action_id,
-                                    const uint8_t *data, uint16_t len);
+extern void gopro_cohn_on_response(gopro_ble_ctx_t *ctx, uint8_t feature_id,
+                                    uint8_t action_id,
+                                    const uint8_t *body, uint16_t body_len);
+
+/*
+ * A protobuf feature response on any channel: [feature_id, action_id, body...].
+ * Strip the 2-byte header and dispatch the body to the COHN handler.
+ */
+static void dispatch_proto_resp(gopro_ble_ctx_t *ctx,
+                                 const uint8_t *data, uint16_t len)
+{
+    if (len < GOPRO_PROTO_RESP_HDR_LEN) {
+        ESP_LOGW(TAG, "slot %d: short proto resp len=%d", ctx->slot, len);
+        return;
+    }
+    uint8_t feature_id = data[GOPRO_PROTO_RESP_FEATURE_IDX];
+    uint8_t action_id  = data[GOPRO_PROTO_RESP_ACTION_IDX];
+    ESP_LOGD(TAG, "slot %d: proto resp feat=0x%02x act=0x%02x body_len=%d",
+             ctx->slot, feature_id, action_id,
+             len - GOPRO_PROTO_RESP_HDR_LEN);
+    gopro_cohn_on_response(ctx, feature_id, action_id,
+                           data + GOPRO_PROTO_RESP_HDR_LEN,
+                           len - GOPRO_PROTO_RESP_HDR_LEN);
+}
 
 static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
                      const uint8_t *data, uint16_t len)
@@ -60,25 +82,38 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         return;
     }
 
+    /*
+     * Protobuf feature responses can arrive on multiple notify pipes:
+     *   - GP-0073 (cmd channel)     for feature 0xF1 (COMMAND)
+     *   - GP-0077 (query channel)   for feature 0xF5 (QUERY)
+     *   - GP-0092 (net_mgmt channel) for feature 0x02 (NETWORK_MGMT)
+     * Detect by the feature_id at byte 0 — all known feature IDs lie outside
+     * the value space used by TLV command IDs, so the same byte unambiguously
+     * tags the format.
+     */
+    uint8_t b0 = data[0];
+    if (b0 == GOPRO_PROTO_FEATURE_NETWORK_MGMT ||
+        b0 == GOPRO_PROTO_FEATURE_COMMAND ||
+        b0 == GOPRO_PROTO_FEATURE_QUERY) {
+        dispatch_proto_resp(ctx, data, len);
+        return;
+    }
+
+    /* Otherwise, fall through to channel-specific TLV handling. */
     switch (chan) {
     case GOPRO_CHAN_CMD:
-        /* Command response: data[0] = command ID that was echoed. */
         if (len >= GOPRO_RESP_HDR_LEN &&
             data[GOPRO_RESP_CMD_IDX] == GOPRO_CMD_GET_HARDWARE_INFO) {
             gopro_readiness_on_response(ctx, data, len);
-        } else {
-            /* Other command responses (SetDateTime, etc.) — log status only. */
-            if (len >= GOPRO_RESP_HDR_LEN) {
-                ESP_LOGD(TAG, "slot %d: cmd resp cmd=0x%02x status=0x%02x",
-                         ctx->slot,
-                         data[GOPRO_RESP_CMD_IDX],
-                         data[GOPRO_RESP_STATUS_IDX]);
-            }
+        } else if (len >= GOPRO_RESP_HDR_LEN) {
+            ESP_LOGD(TAG, "slot %d: cmd resp cmd=0x%02x status=0x%02x",
+                     ctx->slot,
+                     data[GOPRO_RESP_CMD_IDX],
+                     data[GOPRO_RESP_STATUS_IDX]);
         }
         break;
 
     case GOPRO_CHAN_SETTINGS:
-        /* Keepalive and settings responses — acknowledge and discard. */
         if (len >= GOPRO_RESP_HDR_LEN) {
             ESP_LOGD(TAG, "slot %d: settings resp cmd=0x%02x status=0x%02x",
                      ctx->slot,
@@ -88,20 +123,12 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         break;
 
     case GOPRO_CHAN_QUERY:
-        /* Query responses — not yet consumed by this component. */
         ESP_LOGD(TAG, "slot %d: query resp len=%d", ctx->slot, len);
         break;
 
     case GOPRO_CHAN_NET_MGMT:
-        /* Network management response: data[2] = action ID response byte. */
-        if (len >= GOPRO_NMGMT_RESP_HDR_LEN &&
-            data[GOPRO_NMGMT_RESP_MARKER_IDX] == GOPRO_PROTO_RESP_MARKER) {
-            uint8_t action_id = data[GOPRO_NMGMT_RESP_ACTION_IDX];
-            gopro_cohn_on_response(ctx, action_id, data, len);
-        } else {
-            ESP_LOGW(TAG, "slot %d: unexpected net_mgmt resp marker=0x%02x",
-                     ctx->slot, len > 0 ? data[0] : 0xFF);
-        }
+        ESP_LOGW(TAG, "slot %d: unexpected non-protobuf net_mgmt resp byte0=0x%02x",
+                 ctx->slot, b0);
         break;
     }
 }

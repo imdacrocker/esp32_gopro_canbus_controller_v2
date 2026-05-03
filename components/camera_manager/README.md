@@ -50,7 +50,7 @@ cam_1/camera
 ...
 ```
 
-**Schema version policy:** a blob with a mismatched `version` byte is discarded and the slot is left unconfigured. Re-pairing is required. No automatic migration.
+**Schema version policy:** a blob with a mismatched `version` byte is discarded and the slot is left unconfigured. Re-pairing is required. No automatic migration. **Appending new fields at the end of `camera_nv_record_t` is not a version bump** — `load_slot_from_nvs()` zero-initializes the record before `nvs_get_blob`, so smaller legacy blobs leave any new trailing fields zero (the most recent example is `wifi_mac`).
 
 **Save-time validation:** `camera_manager_save_slot()` returns `ESP_ERR_INVALID_ARG` and refuses to write if `model == CAMERA_MODEL_UNKNOWN`.
 
@@ -162,6 +162,8 @@ int camera_manager_find_by_mac(const uint8_t mac[6]);
 
 Linear search of configured slots by raw 6-byte MAC. Returns slot index or `-1`. Used by both WiFi callbacks (station MAC) and BLE callbacks (BLE address bytes).
 
+A slot matches if the input equals **either** the slot's `mac` (BLE peer MAC, set at registration) **or** its `wifi_mac` (WiFi-side MAC, learned from the COHN status response). GoPro cameras run BLE and WiFi on separate radios with distinct MACs, so a single field would only match one of the two callback families.
+
 ```c
 int camera_manager_register_new(const uint8_t mac[6]);
 ```
@@ -188,9 +190,14 @@ void camera_manager_on_ble_disconnected_by_handle(uint16_t conn_handle);
 void camera_manager_set_model(int slot, camera_model_t model);
 void camera_manager_set_name(int slot, const char *name);
 void camera_manager_set_camera_ready(int slot, bool ready);
+void camera_manager_on_cohn_provisioned(int slot,
+                                         const uint8_t wifi_mac[6],
+                                         uint32_t ip);
 ```
 
-`set_camera_ready(true)` sets `WIFI_CAM_CONNECTED` (IP assigned; driver probe can proceed). It does **not** set `WIFI_CAM_READY` — that is done by the driver after its probe succeeds via `on_wifi_connected()`.
+`set_camera_ready(true)` sets `WIFI_CAM_CONNECTED` (IP assigned; driver probe can proceed). It does **not** set `WIFI_CAM_READY` — that is done by the driver after its probe succeeds via `on_wifi_connected()`. Use this on the cached-credential path (NVS already has COHN creds and a `wifi_mac`/`last_ip`); if `last_ip` is non-zero it also dispatches `drv->on_wifi_associated` so the probe can fire even when the DHCP event arrived before the slot transitioned to `WIFI_CAM_CONNECTED`.
+
+`on_cohn_provisioned(slot, wifi_mac, ip)` is the fresh-provisioning equivalent: in one atomic operation it records `wifi_mac`, sets `last_ip`+`ip_addr` and flips `wifi_status` to `CONNECTED`, persists the slot to NVS (so future DHCP events can match the slot via `wifi_mac` even after a reboot), and dispatches `drv->on_wifi_associated`. `open_gopro_ble`'s COHN flow calls this once it has parsed `macaddress` (field 8) and `ipaddress` (field 5) out of `NotifyCOHNStatus`.
 
 ---
 
@@ -204,7 +211,7 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip);
 
 `on_wifi_connected` sets `WIFI_CAM_READY` and starts the mismatch poll timer.  
 `on_wifi_disconnected` stops the timer and resets `wifi_status` to `WIFI_CAM_NONE`.  
-`on_station_ip` updates `last_ip` for any configured slot whose MAC matches (called from the wifi_manager DHCP callback).
+`on_station_ip` updates `last_ip` for any configured slot whose `mac` or `wifi_mac` matches (called from the wifi_manager DHCP callback). If `wifi_status == WIFI_CAM_CONNECTED` at the time of the call, it also dispatches `drv->on_wifi_associated`. Be aware of the ordering: during first-time COHN provisioning, DHCP fires *before* the slot transitions to `CONNECTED` (CreateCert + status poll take a few seconds), so this path skips the driver dispatch — `on_cohn_provisioned` is what closes that gap.
 
 ---
 

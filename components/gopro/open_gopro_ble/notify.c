@@ -26,19 +26,23 @@ void gopro_notify_rx(uint16_t conn_handle, uint16_t attr_handle,
     const gopro_gatt_handles_t *g = &ctx->gatt;
     gopro_channel_t chan;
 
+    const char *chan_name;
     if (attr_handle == g->cmd_resp_notify) {
-        chan = GOPRO_CHAN_CMD;
+        chan = GOPRO_CHAN_CMD;       chan_name = "cmd";
     } else if (attr_handle == g->settings_resp_notify) {
-        chan = GOPRO_CHAN_SETTINGS;
+        chan = GOPRO_CHAN_SETTINGS;  chan_name = "settings";
     } else if (attr_handle == g->query_resp_notify) {
-        chan = GOPRO_CHAN_QUERY;
+        chan = GOPRO_CHAN_QUERY;     chan_name = "query";
     } else if (attr_handle == g->net_mgmt_resp_notify) {
-        chan = GOPRO_CHAN_NET_MGMT;
+        chan = GOPRO_CHAN_NET_MGMT;  chan_name = "net_mgmt";
     } else {
-        ESP_LOGD(TAG, "slot %d: notify on unregistered handle 0x%04x",
-                 ctx->slot, attr_handle);
+        ESP_LOGW(TAG, "slot %d: notify on unregistered handle 0x%04x len=%d",
+                 ctx->slot, attr_handle, len);
         return;
     }
+
+    ESP_LOGD(TAG, "slot %d: notify on %s (h=0x%04x) len=%d",
+             ctx->slot, chan_name, attr_handle, len);
 
     gopro_query_feed(ctx, chan, data, len);
 }

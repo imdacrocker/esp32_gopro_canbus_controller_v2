@@ -116,6 +116,24 @@ void camera_manager_set_name(int slot, const char *name);
 void camera_manager_set_camera_ready(int slot, bool ready);
 
 /*
+ * Called by open_gopro_ble after a fresh COHN provisioning round delivers
+ * the camera's WiFi-side MAC and current IP via the NotifyCOHNStatus
+ * protobuf body.  Atomically:
+ *   - Records wifi_mac (so future on_station_ip lookups match the slot).
+ *   - Sets last_ip + ip_addr to the provided value.
+ *   - Sets wifi_status = WIFI_CAM_CONNECTED.
+ *   - Persists the slot to NVS (so wifi_mac survives reboots).
+ *   - Triggers drv->on_wifi_associated so the driver can probe.
+ *
+ * Use this instead of set_camera_ready when fresh MAC/IP are available;
+ * set_camera_ready is for the cached-credentials path where only NVS state
+ * is reliable.
+ */
+void camera_manager_on_cohn_provisioned(int slot,
+                                         const uint8_t wifi_mac[6],
+                                         uint32_t ip);
+
+/*
  * Called by the driver after its probe succeeds.
  * Sets WIFI_CAM_READY and starts the per-slot mismatch poll timer.
  */

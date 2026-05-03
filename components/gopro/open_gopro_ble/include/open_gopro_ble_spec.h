@@ -160,78 +160,126 @@ static const uint8_t k_gopro_keepalive_pkt[2] = { 0x01u, GOPRO_CMD_KEEPALIVE };
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/query.html#get-hardware-info
  */
 
-/* ---- Network management (COHN) protobuf encoding ------------------------- */
+/* ---- Multi-channel protobuf operations ----------------------------------- */
 
 /*
- * COHN provisioning commands use the GPBS protobuf channel:
+ * Some BLE features are exposed as protobuf-encoded action commands rather
+ * than TLV.  Each request and response is wrapped with a 2-byte header
+ * identifying the feature and action; the rest of the payload is a protobuf
+ * message defined in the OpenGoPro .proto files.
  *
- * Packet payload (after GPBS length header):
- *   [0]: 0xF1 — protobuf feature command marker
- *   [1]: feature ID (0x02 = Network Management)
- *   [2]: action ID (see below)
- *   [3..]: protobuf-encoded request body
+ * Packet payload (after the GPBS length header):
+ *   [0]: feature_id   — see GOPRO_PROTO_FEATURE_*
+ *   [1]: action_id    — request: 0x05, 0x65, 0x67, 0x6F, ...
+ *                       response: request_action | 0x80
+ *   [2..]: protobuf body
  *
- * Response payload (from net_mgmt_resp_notify GP-0092):
- *   [0]: 0xF5 — protobuf feature response marker
- *   [1]: feature ID
- *   [2]: action ID (response version, high bit set)
- *   [3]: result code (0x00 = success)
- *   [4..]: protobuf-encoded response body
+ * Routing:
+ *   - Network-management actions (feature 0x02) are written to GP-0091 and
+ *     responses arrive on GP-0092.
+ *   - Command actions (feature 0xF1, includes COHN) are written to GP-0072
+ *     and responses arrive on GP-0073, sharing the channel with TLV cmd
+ *     responses (distinguished by data[0]: TLV cmd IDs are well below 0xF1).
  *
- * Spec: https://gopro.github.io/OpenGoPro/ble/features/network_management.html
+ * Result codes for ResponseGeneric / ResponseConnectNew come from the
+ * EnumResultGeneric enum (1 = SUCCESS); the result is the first protobuf
+ * field, NOT a fixed byte offset.
+ *
+ * Spec: OpenGoPro protobuf definitions at github.com/gopro/OpenGoPro/protobuf
  */
-#define GOPRO_PROTO_FEATURE_NET_MGMT   0x02u
-#define GOPRO_PROTO_CMD_MARKER         0xF1u
-#define GOPRO_PROTO_RESP_MARKER        0xF5u
+#define GOPRO_PROTO_FEATURE_NETWORK_MGMT  0x02u  /* WiFi connect, scan, AP entries */
+#define GOPRO_PROTO_FEATURE_COMMAND       0xF1u  /* COHN cert/setting, camera control */
+#define GOPRO_PROTO_FEATURE_QUERY         0xF5u  /* COHN status/cert reads, queries */
 
-/* Action IDs for Network Management feature */
-#define GOPRO_COHN_ACTION_CREATE_CERT  0xF4u
-#define GOPRO_COHN_ACTION_SET_AP       0xF0u
-#define GOPRO_COHN_ACTION_CONNECT      0xF2u
-#define GOPRO_COHN_ACTION_GET_STATUS   0xF8u
+/* Network-management action IDs (feature 0x02) */
+#define GOPRO_NETMGMT_ACTION_SCAN         0x02u  /* RequestStartScan */
+#define GOPRO_NETMGMT_ACTION_CONNECT_NEW  0x05u  /* RequestConnectNew */
+#define GOPRO_NETMGMT_RESP_SCAN           0x82u  /* ResponseStartScanning */
+#define GOPRO_NETMGMT_RESP_CONNECT_NEW    0x85u  /* ResponseConnectNew */
+#define GOPRO_NETMGMT_NOTIF_SCAN          0x0Bu  /* NotifStartScanning */
+#define GOPRO_NETMGMT_NOTIF_PROVIS        0x0Cu  /* NotifProvisioningState */
 
-/* COHN response action IDs (response bit pattern) */
-#define GOPRO_COHN_RESP_CREATE_CERT    0xF5u
-#define GOPRO_COHN_RESP_SET_AP         0xF1u
-#define GOPRO_COHN_RESP_CONNECT        0xF3u
-#define GOPRO_COHN_RESP_GET_STATUS     0xF9u
+/* COMMAND-feature action IDs (feature 0xF1) — COHN cert + setting writes. */
+#define GOPRO_COHN_ACTION_SET_SETTING     0x65u
+#define GOPRO_COHN_ACTION_CREATE_CERT     0x67u
+#define GOPRO_COHN_RESP_SET_SETTING       0xE5u
+#define GOPRO_COHN_RESP_CREATE_CERT       0xE7u
 
-/* COHN status result code (success) */
-#define GOPRO_COHN_RESULT_OK           0x00u
+/* QUERY-feature action IDs (feature 0xF5) — COHN status / cert reads. */
+#define GOPRO_COHN_ACTION_GET_STATUS      0x6Fu  /* RequestGetCOHNStatus */
+#define GOPRO_COHN_RESP_GET_STATUS        0xEFu  /* ResponseGetCOHNStatus */
+
+/* Scan progress (NotifStartScanning.scanning_state, EnumScanning) */
+#define GOPRO_NETMGMT_SCAN_SUCCESS              5u
+#define GOPRO_NETMGMT_SCAN_ABORTED_BY_SYSTEM    3u
+#define GOPRO_NETMGMT_SCAN_CANCELLED_BY_USER    4u
+
+/* Connect progress (NotifProvisioningState.provisioning_state, EnumProvisioning) */
+#define GOPRO_NETMGMT_PROVIS_STARTED            2u
+#define GOPRO_NETMGMT_PROVIS_SUCCESS_NEW_AP     5u
+#define GOPRO_NETMGMT_PROVIS_SUCCESS_OLD_AP     6u
+/* values 3, 4, 7-11 are abort/error states */
+
+/* ---- Protobuf encoding helpers ------------------------------------------ */
+
+/* Protobuf wire types: 0=varint, 1=64-bit, 2=len-delim, 5=32-bit. */
+/* Field tag byte = (field_number << 3) | wire_type. */
+
+/* ResponseGeneric / ResponseConnectNew share field 1 = EnumResultGeneric. */
+#define GOPRO_RESP_GENERIC_RESULT_TAG  0x08u  /* field 1, varint */
+#define GOPRO_RESP_GENERIC_SUCCESS     0x01u  /* EnumResultGeneric.RESULT_SUCCESS */
+
+/* RequestCreateCOHNCert protobuf body. override=true forces the camera to
+ * regenerate the certificate and (re)provision COHN even if it already had
+ * a cert from a previous session. */
+#define GOPRO_COHN_CREATE_PB_OVERRIDE_TAG 0x08u  /* field 1, varint bool */
+
+/* RequestSetCOHNSetting protobuf body. */
+#define GOPRO_COHN_SETTING_PB_ACTIVE_TAG  0x08u  /* field 1, varint bool */
+
+/* RequestGetCOHNStatus protobuf body — register_cohn_status=true subscribes
+ * to push notifications when status changes (in addition to our own polling). */
+#define GOPRO_COHN_STATUS_PB_REGISTER_TAG 0x08u  /* field 1, varint bool */
 
 /*
- * COHN protobuf field numbers for RequestGetCOHNStatus response:
- *   field 1 (varint): status enum (3 = CONNECTED)
- *   field 2 (string): username
- *   field 3 (string): password
- *   field 4 (string): ipaddress (camera's IP on the AP)
- *
- * Protobuf wire types: 0=varint, 1=64-bit, 2=len-delim, 5=32-bit
- * Field tag byte = (field_number << 3) | wire_type
+ * NotifyCOHNStatus protobuf field tags (response body of RequestGetCOHNStatus).
+ *   field 1 varint:     EnumCOHNStatus       (1 = COHN_PROVISIONED)
+ *   field 2 varint:     EnumCOHNNetworkState (27 = NetworkConnected)
+ *   field 3 string:     username
+ *   field 4 string:     password
+ *   field 5 string:     ipaddress
+ *   field 6 varint bool: enabled
+ *   field 7 string:     ssid
+ *   field 8 string:     macaddress
  */
 #define GOPRO_COHN_PB_STATUS_TAG     0x08u  /* field 1, varint */
-#define GOPRO_COHN_PB_USER_TAG       0x12u  /* field 2, len-delim */
-#define GOPRO_COHN_PB_PASS_TAG       0x1Au  /* field 3, len-delim */
-#define GOPRO_COHN_STATUS_CONNECTED  3u
+#define GOPRO_COHN_PB_STATE_TAG      0x10u  /* field 2, varint */
+#define GOPRO_COHN_PB_USER_TAG       0x1Au  /* field 3, len-delim */
+#define GOPRO_COHN_PB_PASS_TAG       0x22u  /* field 4, len-delim */
+#define GOPRO_COHN_PB_IP_TAG         0x2Au  /* field 5, len-delim */
+#define GOPRO_COHN_PB_ENABLED_TAG    0x30u  /* field 6, varint bool */
+#define GOPRO_COHN_PB_MAC_TAG        0x42u  /* field 8, len-delim — camera's WiFi-side MAC */
+
+#define GOPRO_COHN_STATUS_PROVISIONED   1u
+#define GOPRO_COHN_STATE_NET_CONNECTED  27u
 
 /*
- * Protobuf field numbers for RequestSetApEntries:
- *   field 1 (string): ssid
- *   field 2 (string): password  (empty for open AP)
- *   field 3 (varint): security_type (0 = open)
+ * RequestConnectNew protobuf field tags.  ssid + password are required by
+ * the proto definition; pass an empty string for an open AP.
+ *
+ * bypass_eula_check (field 10) skips the camera's "verify internet" gate —
+ * required for connecting to an isolated SoftAP with no internet uplink,
+ * otherwise the camera stalls on EULA verification and never responds.
  */
-#define GOPRO_SETAP_PB_SSID_TAG       0x0Au  /* field 1, len-delim */
-#define GOPRO_SETAP_PB_PASS_TAG       0x12u  /* field 2, len-delim */
-#define GOPRO_SETAP_PB_SECTYPE_TAG    0x18u  /* field 3, varint */
-#define GOPRO_SETAP_SECURITY_OPEN     0x00u
+#define GOPRO_NETMGMT_PB_SSID_TAG         0x0Au  /* field 1, len-delim */
+#define GOPRO_NETMGMT_PB_PASS_TAG         0x12u  /* field 2, len-delim */
+#define GOPRO_NETMGMT_PB_BYPASS_EULA_TAG  0x50u  /* field 10, varint bool */
 
-/* ---- COHN net_mgmt response header indices ------------------------------ */
+/* ---- Protobuf response header indices ----------------------------------- */
 
-#define GOPRO_NMGMT_RESP_MARKER_IDX   0u
-#define GOPRO_NMGMT_RESP_FEATURE_IDX  1u
-#define GOPRO_NMGMT_RESP_ACTION_IDX   2u
-#define GOPRO_NMGMT_RESP_RESULT_IDX   3u
-#define GOPRO_NMGMT_RESP_HDR_LEN      4u
+#define GOPRO_PROTO_RESP_FEATURE_IDX  0u
+#define GOPRO_PROTO_RESP_ACTION_IDX   1u
+#define GOPRO_PROTO_RESP_HDR_LEN      2u
 
 /* ---- Readiness poll parameters ------------------------------------------- */
 

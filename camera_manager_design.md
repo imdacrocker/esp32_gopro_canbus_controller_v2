@@ -87,6 +87,7 @@ The custom partition table reserves a 3 MB `storage` partition for the LittleFS 
 ```
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 
 # Pin NimBLE host and BT controller to core 1 (§4.1)
 CONFIG_BT_NIMBLE_PINNED_TO_CORE_1=y
@@ -312,13 +313,16 @@ typedef struct {
     uint8_t       version;       /* Schema version — currently 1                        */
     char          name[32];      /* Human-readable camera name                          */
     camera_model_t model;        /* Must not be CAMERA_MODEL_UNKNOWN at save time       */
-    uint8_t       mac[6];        /* BLE addr for COHN cameras; WiFi MAC for RC-emulation*/
+    uint8_t       mac[6];        /* BLE peer MAC (COHN) / WiFi MAC (RC-emulation)       */
     uint32_t      last_ip;       /* Last DHCP-assigned IP; updated on each connection   */
     bool          is_configured;
+    uint8_t       wifi_mac[6];   /* COHN cameras only: WiFi-side MAC, learned from
+                                     NotifyCOHNStatus.macaddress.  Zero on RC-emulation
+                                     slots and on legacy records (see policy below).    */
 } camera_nv_record_t;
 ```
 
-**Schema versioning policy:** A blob whose `version` does not match the current schema is discarded; the slot is left unconfigured and re-pairing is required. Firmware upgrades do not automatically invalidate NVS — only a version bump does.
+**Schema versioning policy:** A blob whose `version` does not match the current schema is discarded; the slot is left unconfigured and re-pairing is required. Firmware upgrades do not automatically invalidate NVS — only a version bump does. **Appending new fields at the end of the struct is not a version bump** — `load_slot_from_nvs()` zero-initializes the record before `nvs_get_blob()`, so smaller legacy blobs leave any new trailing fields zero.
 
 **Save-time validation:** `camera_manager_save_slot()` returns `ESP_ERR_INVALID_ARG` and logs an error if `model == CAMERA_MODEL_UNKNOWN`.
 
@@ -346,9 +350,13 @@ typedef struct {
     /* --- Persisted fields (mirrored from cam_N/camera on load) --- */
     char           name[32];
     camera_model_t model;
-    uint8_t        mac[6];
-    uint32_t       last_ip;      /* Updated in NVS each time DHCP assigns a new IP      */
+    uint8_t        mac[6];        /* BLE peer MAC — used by camera_manager_find_by_mac  */
+    uint32_t       last_ip;       /* Updated in NVS each time DHCP assigns a new IP     */
     bool           is_configured;
+    uint8_t        wifi_mac[6];   /* COHN: WiFi-side MAC; find_by_mac matches this too.
+                                     Required because BLE and WiFi radios on a GoPro
+                                     have different MACs, so DHCP/station events would
+                                     otherwise fail to look the slot up.               */
 
     /* --- BLE state (coarse — detail lives in open_gopro_ble) --- */
     cam_ble_status_t ble_status;
@@ -1047,13 +1055,13 @@ All handles are 128-bit GoPro UUIDs of the form `b5f9XXXX-aa8d-11e3-9046-0002a5d
 
 | Handle name | UUID suffix | Direction | Purpose |
 |---|---|---|---|
-| `cmd_write` | `0072` | Write | Command write |
-| `cmd_resp_notify` | `0073` | Notify | Command responses |
+| `cmd_write` | `0072` | Write | TLV commands + COMMAND-feature protobuf (incl. COHN cert/setting/status) |
+| `cmd_resp_notify` | `0073` | Notify | Command responses (TLV + protobuf) |
 | `settings_write` | `0074` | Write | Settings write |
 | `settings_resp_notify` | `0075` | Notify | Settings responses |
 | `query_write` | `0076` | Write | Query write |
 | `query_resp_notify` | `0077` | Notify | Query responses |
-| `net_mgmt_cmd_write` | `0091` | Write | Network management commands (COHN provisioning) |
+| `net_mgmt_cmd_write` | `0091` | Write | NETWORK_MGMT-feature protobuf (WiFi connect/scan) |
 | `net_mgmt_resp_notify` | `0092` | Notify | Network management responses |
 | `wifi_ssid_read` | `0002` | Read | Wi-Fi AP SSID (readable) |
 | `wifi_pass_read` | `0003` | Read | Wi-Fi AP password (readable) |
@@ -1098,11 +1106,15 @@ on_connected(conn_handle, addr)
 on_encrypted(conn_handle, addr)
   -> if unknown: camera_manager_register_new() with placeholder name
   -> snapshot current ATT MTU via ble_att_mtu() and store it in the slot
-     context. We do NOT initiate an MTU exchange ourselves — the camera
-     issues one shortly after encryption and NimBLE answers it with
-     CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU. The cached value is informational
-     only; GoPro fragments long responses at the GPBS layer regardless of
-     ATT MTU, so all reads/writes already work against the 23-byte minimum.
+     context.
+  -> Initiate ATT MTU exchange via ble_gattc_exchange_mtu() and store the
+     negotiated value when the callback fires.  Hero11 / earlier initiate
+     the exchange themselves shortly after encryption, but Hero13 (firmware
+     H24.x) does NOT — without an explicit exchange the link stays at the
+     23-byte default and 22-byte protobuf commands like RequestConnectNew
+     are silently rejected by NimBLE without firing on_write_done's error
+     path.  GoPro also fragments long _responses_ at the GPBS layer, but
+     the MTU still gates outgoing writes.
   -> start_gatt_discovery(conn_handle)
       1. ble_gattc_disc_all_svcs -> for each service:
          ble_gattc_disc_all_chrs -> record GP-00XX handles
@@ -1156,28 +1168,61 @@ open_gopro_ble_sync_time_all()   [called by main.c on first session UTC sync —
 Run only when `cam_N/gopro_cohn` does not contain valid credentials, or when triggered by a re-provisioning event (repeated HTTPS 401 from `open_gopro_http`).
 
 ```
-1. RequestCreateCOHNCert
+1. RequestStartScan  (feature 0x02, action 0x02)
      -> Protobuf command to net_mgmt_cmd_write (GP-0091)
-     -> Response on net_mgmt_resp_notify (GP-0092)
-     -> Camera generates a self-signed TLS cert
-     -> We do NOT read the cert back (ssl.CERT_NONE on SoftAP private network)
+     -> Required to switch the camera from AP to STA mode; without this,
+        RequestConnectNew silently fails and the camera never responds.
+     -> Wait for NotifStartScanning (action 0x0B) with
+                 scanning_state = SCANNING_SUCCESS (5).
 
-2. RequestSetApEntries
-     -> Provide our SoftAP SSID ("HERO-RC-XXXXXX") and empty password (open AP)
-     -> Camera stores the AP credentials
+2. RequestConnectNew  (feature 0x02, action 0x05)
+     -> Protobuf command to net_mgmt_cmd_write (GP-0091)
+     -> Body fields:
+          ssid              = "HERO-RC-XXXXXX"
+          password          = "00000000"   (non-empty placeholder; see below)
+          bypass_eula_check = true
+     -> The password field is `required` in the proto, but the camera ignores
+        the value when the AP advertises open auth.  Three behaviors observed
+        on Hero13 (firmware H24.x):
+          - Field omitted     -> RESULT_ILL_FORMED (proto validator)
+          - Field = ""        -> WPA-PSK handshake against open AP -> state=8
+                                 (PROVISIONING_ERROR_PASSWORD_AUTH)
+          - Field = "12345678" or any non-empty -> camera falls back to open
+                                                    auth from the scan record.
+        bypass_eula_check skips the camera's "verify internet" gate; on an
+        isolated SoftAP without an uplink the camera otherwise stalls waiting
+        for the EULA check to resolve and never responds.
+     -> Wait for NotifProvisioningState (action 0x0C) with
+                 provisioning_state = SUCCESS_NEW_AP (5) or SUCCESS_OLD_AP (6).
 
-3. RequestConnect (or camera auto-connects)
-     -> Camera joins SoftAP
-     -> wifi_manager fires on_station_ip_assigned callback
-     -> gopro_wifi_rc / camera_manager updates last_ip for the slot
+3. RequestCreateCOHNCert{override=true}  (feature 0xF1, action 0x67)
+     -> Protobuf command to cmd_write (GP-0072).
+     -> This step is what actually transitions COHN status from UNPROVISIONED
+        to PROVISIONED; ConnectNew alone leaves the camera associated to the
+        AP but with COHN disabled.  override=true forces a fresh certificate
+        even if one was retained from a previous session.
+     -> Wait for ResponseCreateCOHNCert (action 0xE7) with
+                 EnumResultGeneric = SUCCESS (1).
 
-4. RequestGetCOHNStatus
-     -> Poll until COHN state = CONNECTED (retry with backoff, ~10s total)
-     -> Extract: username (string), password (string)
+4. RequestGetCOHNStatus  (feature 0xF5, action 0x6F)
+     -> Protobuf command to query_write (GP-0076) — note the QUERY channel,
+        not the COMMAND channel.  Sending the same action_id on GP-0072
+        returns UNPROVISIONED forever.
+     -> First call sends register_cohn_status = true; later polls send empty
+        body. Polled every 2 s, up to 15 attempts (~30 s total).
+     -> Wait for: status     = COHN_PROVISIONED,
+                  state      = NetworkConnected (27),
+                  username, password, ipaddress, macaddress all populated.
 
-5. Save to NVS: cam_N/gopro_cohn { cohn_user, cohn_pass }
-6. camera_manager sets wifi_status = WIFI_CAM_CONNECTED
-   -> open_gopro_http probes the camera -> WIFI_CAM_READY
+5. Save credentials to NVS: cam_N/gopro_cohn { cohn_user, cohn_pass }
+
+6. camera_manager_on_cohn_provisioned(slot, wifi_mac, ip)
+   -> Atomically records wifi_mac (parsed from NotifyCOHNStatus field 8) and
+      ip (field 5, parsed via ip4addr_aton); sets last_ip + ip_addr; flips
+      wifi_status to WIFI_CAM_CONNECTED; persists wifi_mac to NVS so future
+      DHCP events can match the slot via the WiFi MAC alone.
+   -> Dispatches drv->on_wifi_associated -> open_gopro_http probes the camera
+      -> WIFI_CAM_READY.
 ```
 
 **Re-provisioning trigger**: `open_gopro_http` calls `open_gopro_ble_reprovision(slot)` after N consecutive HTTPS 401 responses (N TBD during implementation). This clears `cam_N/gopro_cohn` and runs the COHN sequence again on the existing BLE connection. If the BLE connection has been lost, `ble_core`'s background scan will reconnect it first.

@@ -88,14 +88,14 @@ All GoPro characteristics use the 128-bit base UUID `b5f9XXXX-aa8d-11e3-9046-000
 
 | Handle name | UUID suffix | Direction | Channel |
 |------------|-------------|-----------|---------|
-| `cmd_write` | `0072` | Write | Commands (TLV) |
-| `cmd_resp_notify` | `0073` | Notify | Command responses |
+| `cmd_write` | `0072` | Write | Commands — TLV + COMMAND-feature protobuf (incl. COHN) |
+| `cmd_resp_notify` | `0073` | Notify | Command responses (TLV + protobuf) |
 | `settings_write` | `0074` | Write | Settings / keepalive |
 | `settings_resp_notify` | `0075` | Notify | Settings responses |
 | `query_write` | `0076` | Write | Queries |
 | `query_resp_notify` | `0077` | Notify | Query responses |
-| `net_mgmt_cmd_write` | `0091` | Write | COHN provisioning (protobuf) |
-| `net_mgmt_resp_notify` | `0092` | Notify | COHN responses |
+| `net_mgmt_cmd_write` | `0091` | Write | NETWORK_MGMT-feature protobuf (WiFi connect/scan) |
+| `net_mgmt_resp_notify` | `0092` | Notify | NETWORK_MGMT responses |
 | `wifi_ap_pwr_write` | `0001` | Write | WiFi AP power (RC-emulation) |
 | `wifi_ap_ssid_read` | `0002` | Read | WiFi AP SSID (RC-emulation) |
 | `wifi_ap_pass_read` | `0003` | Read | WiFi AP password (RC-emulation) |
@@ -151,17 +151,77 @@ on_disconnected
 Runs when `cam_N/gopro_cohn` has no valid credentials, or when `open_gopro_ble_reprovision()` is called.
 
 ```
-1. RequestCreateCOHNCert   → GP-0091 (camera generates self-signed TLS cert)
-2. RequestSetApEntries     → GP-0091 (SSID = "HERO-RC-XXXXXX", open security)
-3. Camera auto-connects to SoftAP; wifi_manager fires on_station_ip
-4. RequestGetCOHNStatus    → GP-0091, polled every 2 s (up to 15 attempts)
-     status == CONNECTED   → extract username + password from protobuf response
-5. Save to NVS: cam_N/gopro_cohn { cohn_user[32], cohn_pass[64] }
-6. camera_manager_set_camera_ready(slot, true)
-     → open_gopro_http probes the camera → WIFI_CAM_READY
+1. RequestStartScan        → GP-0091 (feature 0x02, action 0x02)
+     - Required to put the camera into STA mode.  Without it, the camera
+       stays in AP mode and silently drops the next ConnectNew with no
+       response of any kind.
+     - Wait for NotifStartScanning (action 0x0B) with
+                scanning_state == SCANNING_SUCCESS (5).
+
+2. RequestConnectNew       → GP-0091 (feature 0x02, action 0x05)
+     - Body fields:
+         ssid               = SoftAP SSID (e.g. "HERO-RC-D8D3FD")
+         password           = "00000000"  ← see note below
+         bypass_eula_check  = true
+     - Camera ignores the password since our SoftAP advertises open auth,
+       but the field must be a non-empty string: omitting the (proto-
+       required) field returns RESULT_ILL_FORMED, and an empty string
+       makes the camera attempt a WPA-PSK handshake against an open AP
+       and fail with PROVISIONING_ERROR_PASSWORD_AUTH.  Any non-empty
+       placeholder satisfies the proto validator and is then ignored.
+     - bypass_eula_check skips the camera's "verify internet" gate; on
+       an isolated SoftAP without an uplink the camera otherwise stalls
+       waiting for the EULA check to resolve and never responds.
+     - Wait for NotifProvisioningState (action 0x0C) with
+                provisioning_state == SUCCESS_NEW_AP (5)
+                                   or SUCCESS_OLD_AP (6).
+
+3. RequestCreateCOHNCert{override=true}  → GP-0072 (feature 0xF1, action 0x67)
+     - This is what actually transitions COHN status from UNPROVISIONED
+       to PROVISIONED on Hero11+; ConnectNew alone leaves the camera
+       associated to the AP but with COHN disabled.
+     - override=true forces a fresh certificate even if one was retained
+       from a previous session.
+     - Wait for ResponseCreateCOHNCert (action 0xE7) with
+                EnumResultGeneric == SUCCESS (1).
+
+4. RequestGetCOHNStatus    → GP-0076 (feature 0xF5, action 0x6F)
+     - Note the channel: this is the QUERY characteristic, not COMMAND.
+       (Sending it on GP-0072 returns UNPROVISIONED forever.)
+     - First call sets register_cohn_status=true so the camera also
+       pushes status updates spontaneously; later poll calls send empty
+       body.  Polled every 2 s, up to 15 attempts (~30 s total).
+     - Wait for NotifyCOHNStatus with
+                 status     == COHN_PROVISIONED (1)
+              && state      == NetworkConnected (27)
+              && username, password, ipaddress, macaddress all populated.
+
+5. Save credentials to NVS: cam_N/gopro_cohn { cohn_user[32], cohn_pass[64] }
+
+6. camera_manager_on_cohn_provisioned(slot, wifi_mac, ip)
+     - Records wifi_mac (parsed from NotifyCOHNStatus field 8) and ip
+       (field 5, parsed via ip4addr_aton) atomically.
+     - The wifi_mac is critical: GoPros have separate BLE and WiFi
+       radios with different MACs.  Without storing the WiFi MAC, the
+       slot can be found from BLE events but not from DHCP / station
+       events, and the HTTP driver never gets triggered.
+     - Sets wifi_status = WIFI_CAM_CONNECTED, persists wifi_mac to NVS,
+       and dispatches drv->on_wifi_associated → open_gopro_http probe →
+       WIFI_CAM_READY.
 ```
 
 TLS certificate verification is skipped (`ssl.CERT_NONE`). The SoftAP is a private closed network; Basic Auth credentials provide adequate protection on that link.
+
+**Protocol gotchas worth knowing:**
+
+- **MTU exchange.** Hero11 / earlier initiate the MTU exchange themselves shortly after encryption; **Hero13 (firmware H24.x) does not.** `pairing.c` calls `ble_gattc_exchange_mtu()` explicitly — without that, the default 23-byte MTU silently rejects the 23-byte ConnectNew packet.
+- **Channel matters for protobuf feature IDs.** Each feature lives on a fixed pair of characteristics; sending the right action_id on the wrong channel returns nothing:
+  | Feature | ID | Write | Notify |
+  |---|---|---|---|
+  | NETWORK_MGMT (scan, connect) | `0x02` | GP-0091 | GP-0092 |
+  | COMMAND (cert ops, set-setting) | `0xF1` | GP-0072 | GP-0073 |
+  | QUERY (cert + status reads) | `0xF5` | GP-0076 | GP-0077 |
+- **Two error enums look alike.** `ResponseConnectNew` carries both a `result` (field 1, `EnumResultGeneric` — `2 = ILL_FORMED`) and a `provisioning_state` (field 2, `EnumProvisioning` — `2 = STARTED`). Logging which enum a numeric value belongs to saves real debugging time.
 
 ---
 

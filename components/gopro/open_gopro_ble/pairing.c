@@ -7,9 +7,38 @@
 #include <string.h>
 #include "esp_log.h"
 #include "host/ble_hs.h"
+#include "host/ble_gatt.h"
 #include "open_gopro_ble_internal.h"
 
 static const char *TAG = "gopro_ble/pair";
+
+/*
+ * Hero11+ cameras typically initiate the ATT MTU exchange themselves shortly
+ * after encryption, but Hero13 (firmware H24.x) does not — leaving the link at
+ * the 23-byte default, which is too small for protobuf commands like
+ * RequestConnectNew.  We initiate the exchange ourselves; cameras that already
+ * exchanged simply ack the existing MTU.
+ */
+static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *error,
+                             uint16_t mtu, void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    if (error->status == 0) {
+        ctx->negotiated_mtu = mtu;
+        ESP_LOGI(TAG, "slot %d: MTU exchanged, negotiated mtu=%u",
+                 ctx->slot, mtu);
+    } else {
+        ESP_LOGW(TAG, "slot %d: MTU exchange status=0x%04x, using existing mtu=%u",
+                 ctx->slot, error->status, ctx->negotiated_mtu);
+    }
+    /* Refresh from NimBLE in case the value moved underneath us. */
+    uint16_t cur = ble_att_mtu(conn_handle);
+    if (cur != 0) {
+        ctx->negotiated_mtu = cur;
+    }
+    gopro_gatt_start_discovery(ctx);
+    return 0;
+}
 
 /* ---- on_connected -------------------------------------------------------- */
 
@@ -66,10 +95,20 @@ void gopro_on_encrypted(uint16_t conn_handle, ble_addr_t addr)
 
     camera_manager_on_ble_connected(slot, conn_handle);
 
-    ESP_LOGI(TAG, "encrypted slot %d conn=%d mtu=%d",
+    ESP_LOGI(TAG, "encrypted slot %d conn=%d mtu=%d (initial)",
              slot, conn_handle, ctx->negotiated_mtu);
 
-    gopro_gatt_start_discovery(ctx);
+    /*
+     * Initiate ATT MTU exchange before discovery — Hero13 does not initiate
+     * it, and the default 23-byte MTU prevents larger protobuf commands
+     * (e.g. RequestConnectNew) from fitting in a single ATT Write Request.
+     */
+    int rc = ble_gattc_exchange_mtu(conn_handle, on_mtu_exchanged, ctx);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "slot %d: ble_gattc_exchange_mtu rc=%d, proceeding with mtu=%d",
+                 slot, rc, ctx->negotiated_mtu);
+        gopro_gatt_start_discovery(ctx);
+    }
 }
 
 /* ---- on_disconnected ----------------------------------------------------- */
