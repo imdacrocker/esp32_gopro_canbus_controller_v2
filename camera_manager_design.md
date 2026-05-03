@@ -98,8 +98,11 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=5
 # Bonding storage in NVS
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
-# ATT MTU — request the maximum so GoPro long responses
-# (GetHardwareInfoRsp ~88 bytes) do not fragment
+# ATT MTU — advertised when the camera initiates an MTU exchange (we never
+# initiate one ourselves). A larger MTU shrinks ATT-level fragmentation, but
+# note that GoPro also fragments long responses at the GPBS application
+# layer (e.g. GetHardwareInfoRsp ~88 bytes), so reassembly is required
+# regardless of the negotiated ATT MTU.
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 ```
 
@@ -796,7 +799,7 @@ esp_err_t ble_core_gatt_write(uint16_t conn_handle, uint16_t attr_handle,
                                const uint8_t *data, uint16_t len);
 ```
 
-Write Without Response (ATT write command). Non-blocking on success. Used by `open_gopro_ble` to send OpenGoPro TLV commands to the camera.
+ATT Write Request (write-with-response). Non-blocking on success. Used by `open_gopro_ble` to send OpenGoPro commands to the camera. The OpenGoPro spec lists the command/settings/query/net-mgmt characteristics as plain "Write" — Hero13 and later silently drop ATT Write Commands on those handles, so the request form is required. The ATT-level write response only confirms receipt; application-level GoPro responses still arrive asynchronously via GATT notifications.
 
 ### 12.9 Callback Table
 
@@ -1094,21 +1097,21 @@ on_connected(conn_handle, addr)
 
 on_encrypted(conn_handle, addr)
   -> if unknown: camera_manager_register_new() with placeholder name
+  -> snapshot current ATT MTU via ble_att_mtu() and store it in the slot
+     context. We do NOT initiate an MTU exchange ourselves — the camera
+     issues one shortly after encryption and NimBLE answers it with
+     CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU. The cached value is informational
+     only; GoPro fragments long responses at the GPBS layer regardless of
+     ATT MTU, so all reads/writes already work against the 23-byte minimum.
   -> start_gatt_discovery(conn_handle)
-      1. Negotiate MTU — request the NimBLE-configured maximum (typically
-         BLE_ATT_MTU_MAX). Read back the actual negotiated MTU from
-         BLE_GAP_EVENT_MTU and store it in the slot context. All subsequent
-         reads/writes must size against the negotiated MTU, never a hardcoded
-         constant — the camera may negotiate down to 23 bytes and we must not
-         silently truncate long responses (e.g. GetHardwareInfoRsp at ~88 bytes).
-      2. ble_gattc_disc_all_svcs -> for each service:
+      1. ble_gattc_disc_all_svcs -> for each service:
          ble_gattc_disc_all_chrs -> record GP-00XX handles
-      3. Subscribe to all notify/indicate CCCDs sequentially
-      4. On all CCCDs done -> commit handles to gopro_ble_ctx_t
+      2. Subscribe to all notify/indicate CCCDs sequentially
+      3. On all CCCDs done -> commit handles to gopro_ble_ctx_t
          -> gopro_start_readiness_poll(conn_handle)
 
 gopro_start_readiness_poll
-  -> send GetHardwareInfo (0x3C) to query_write (GP-0076)
+  -> send GetHardwareInfo (0x3C) to cmd_write (GP-0072) as a Write Request
   -> arm 3s one-shot readiness_timer
   -> on response (cmd_resp_notify, GP-0073):
       status 0x00 -> camera hardware ready -> gopro_on_camera_ready()
@@ -1116,7 +1119,8 @@ gopro_start_readiness_poll
       timer fires -> same as non-zero
 
 gopro_on_camera_ready()
-  -> extract camera_model_t from GetHardwareInfo response
+  -> parse the positional LV body (model #, model name, firmware, serial,
+     AP SSID, AP MAC), log it, and extract camera_model_t from the model #
   -> camera_manager_set_model(slot, model)
   -> check cam_N/gopro_cohn in NVS:
 
@@ -1241,8 +1245,8 @@ const camera_driver_t *open_gopro_ble_get_driver(void);
 | `include/open_gopro_ble_spec.h` | Named constants, packet byte arrays, command IDs, response field offsets, and spec-URL comments for every BLE command and notification used by this component. This is the canonical reference layer — all `.c` files include it rather than embedding raw byte literals. |
 | `driver.c` | `open_gopro_ble_init()`, vtable registration, `create_driver_ctx()` |
 | `pairing.c` | `on_connected`, `on_encrypted`, `on_disconnected` callbacks |
-| `gatt.c` | MTU negotiation, service/characteristic discovery, CCCD subscriptions |
-| `readiness.c` | GetHardwareInfo poll; on success extracts `camera_model_t`, calls `gopro_on_camera_ready()` |
+| `gatt.c` | Service/characteristic discovery, CCCD subscriptions. No explicit MTU exchange — the camera initiates and NimBLE answers with `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU`. |
+| `readiness.c` | GetHardwareInfo poll; positional length-value (LV) parser for the response body — logs model number/name, firmware, serial, AP SSID and MAC, then calls `gopro_on_camera_ready()` with the model number |
 | `control.c` | SetDateTime, BLE keepalive timer |
 | `cohn.c` *(new)* | COHN provisioning sequence, NVS read/write for `cam_N/gopro_cohn`, `reprovision()` |
 | `query.c` | GPBS reassembly, command response dispatch by cmd_id |

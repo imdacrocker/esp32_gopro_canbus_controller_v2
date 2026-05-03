@@ -11,7 +11,7 @@ Recording commands are **not** sent over BLE. Once COHN provisioning is complete
 - **Discovery**: filter BLE advertisements by the GoPro service UUID (`0xFEA6`); maintain a 10-entry list for the web UI (`GET /api/cameras`).
 - **Pairing**: register new cameras into `camera_manager` on first bond; reconnect known cameras from NVS bond store.
 - **GATT setup**: discover all characteristics across the full handle range, then subscribe CCCDs for all notify/indicate characteristics.
-- **Readiness poll**: send `GetHardwareInfo` (0x3C) after GATT setup; retry up to 10× at 3-second intervals. Extract `camera_model_t` from the response and hand it to `camera_manager`.
+- **Readiness poll**: send `GetHardwareInfo` (0x3C) after GATT setup; retry up to 10× at 3-second intervals. Parse the positional LV body (model number, model name, firmware, serial, AP SSID, AP MAC), log them at INFO, and hand the model number to `camera_manager` as `camera_model_t`.
 - **COHN provisioning**: when the camera is ready and no COHN credentials exist in NVS, run the 4-step provisioning sequence over the network management channel (GP-0091/0092).
 - **UTC sync**: send `SetDateTime` to all connected cameras when UTC is live-synced this session; unblock any provisioning sequences that were waiting for it. `SetDateTime` is internally gated on `can_manager_utc_is_session_synced()`, so an NVS-restored UTC at boot does not push stale time to a camera.
 - **BLE keepalive**: send `0x42` to the settings channel (GP-0074) every 3 seconds to prevent camera auto-sleep.
@@ -39,8 +39,8 @@ REQUIRES: bt, nvs_flash, esp_wifi, esp_timer, freertos, camera_manager, can_mana
 | `open_gopro_ble_internal.h` | Private shared types (`gopro_gatt_handles_t`, `gopro_ble_ctx_t`, `gopro_channel_t`) and internal function declarations |
 | `driver.c` | Per-slot context table, discovery list with UUID filter, `open_gopro_ble_init()` |
 | `pairing.c` | `on_connected` / `on_encrypted` / `on_disconnected` callbacks registered with `ble_core` |
-| `gatt.c` | MTU read, full-handle-range characteristic discovery, sequential CCCD subscription state machine |
-| `readiness.c` | `GetHardwareInfo` retry loop; TLV model-number parser; branches to provisioning or ready |
+| `gatt.c` | Full-handle-range service/characteristic discovery, sequential CCCD subscription state machine. No explicit MTU exchange — the camera initiates and NimBLE replies with `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU`. |
+| `readiness.c` | `GetHardwareInfo` retry loop; positional length-value (LV) hardware-info parser that logs model number/name, firmware, serial, AP SSID and MAC; branches to provisioning or ready |
 | `control.c` | `SetDateTime` TLV packet builder; 3-second periodic keepalive timer |
 | `cohn.c` | COHN 4-step provisioning sequence; hand-rolled protobuf encode/decode; NVS `cam_N/gopro_cohn` read/write |
 | `query.c` | GPBS packet reassembler (general / ext-13 / ext-16 headers, continuation packets); 4-channel response dispatch |
@@ -115,7 +115,8 @@ on_connected(conn_handle, addr)
 on_encrypted(conn_handle, addr)
   known camera  → camera_manager_on_ble_connected()
   new camera    → camera_manager_register_new(); if slots full → disconnect
-  → read negotiated MTU via ble_att_mtu()
+  → snapshot current ATT MTU via ble_att_mtu() (camera will typically
+    initiate an MTU exchange shortly after; we don't initiate one ourselves)
   → gopro_gatt_start_discovery()
 
 gatt discovery complete

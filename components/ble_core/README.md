@@ -12,7 +12,7 @@ Manages the NimBLE host stack for the GoPro controller. Handles background recon
 - Manage connection lifecycle: connect → initiate encryption → notify caller.
 - Handle bonding: Just Works pairing, NVS persistence, stale-bond detection and purge.
 - Receive GATT notifications and forward them to the caller.
-- Post GATT Write Without Response commands from any task safely onto the NimBLE event queue.
+- Post GATT Write Requests (write-with-response) from any task safely onto the NimBLE event queue.
 
 ---
 
@@ -37,7 +37,7 @@ REQUIRES: bt, nvs_flash
 | `ble_init.c` | NimBLE init, SMP config, host task, `on_sync`/`on_reset` |
 | `ble_scan.c` | Background/discovery scan, connect-by-address, scan state machine |
 | `ble_connect.c` | GAP event handler (connect, disconnect, encrypt, notify, repeat-pairing), bond purge/remove |
-| `ble_gatt_write.c` | Async GATT Write Without Response |
+| `ble_gatt_write.c` | Async GATT Write Request (write-with-response) |
 | `ble_core_internal.h` | Shared state and internal function declarations |
 
 ---
@@ -164,7 +164,7 @@ esp_err_t ble_core_gatt_write(
 );
 ```
 
-Send a GATT Write Without Response (ATT Write Command) to the attribute at `attr_handle` on the connection identified by `conn_handle`. No confirmation is received; GoPro cameras respond via GATT notifications.
+Send a GATT Write Request (ATT Write-with-Response) to the attribute at `attr_handle` on the connection identified by `conn_handle`. The OpenGoPro spec lists the command/settings/query/net-mgmt characteristics as plain "Write"; Hero13 and later silently drop ATT Write Commands on those handles, so the request form is required. The ATT-level write response only confirms receipt — application-level responses still arrive asynchronously via GATT notifications.
 
 Safe to call from any task (HTTP handler, `camera_manager` timers, CAN RX task). Async — copies `data` into a heap buffer and posts to the NimBLE event queue. Returns `ESP_ERR_NO_MEM` if allocation fails.
 
