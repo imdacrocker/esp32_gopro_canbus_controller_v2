@@ -12,8 +12,10 @@ static const char *TAG = "ble_core";
 /* ---------------------------------------------------------------------------
  * ble_core_gatt_write
  *
- * ATT Write Without Response (write command).  Non-blocking — callers do not
- * receive a confirmation; GoPro cameras respond via notifications instead.
+ * ATT Write Request (write-with-response).  The OpenGoPro spec lists the
+ * command/settings/query characteristics as "Write" — Hero13 and later silently
+ * drop ATT Write Commands on those handles.  GoPro responses themselves still
+ * arrive via notifications; the ATT write response only confirms receipt.
  *
  * Routed through the NimBLE event queue so it is safe to call from HTTP
  * handler tasks or camera_manager timers running on any core.
@@ -26,12 +28,24 @@ typedef struct {
     uint8_t  data[];   /* flexible array — allocated with the struct */
 } gatt_write_args_t;
 
+static int on_write_done(uint16_t conn_handle, const struct ble_gatt_error *error,
+                          struct ble_gatt_attr *attr, void *arg)
+{
+    if (error->status != 0) {
+        ESP_LOGW(TAG, "gatt write status=0x%04x conn=%u attr=%u",
+                 error->status, conn_handle,
+                 attr ? attr->handle : 0);
+    }
+    return 0;
+}
+
 static void do_gatt_write(struct ble_npl_event *ev)
 {
     gatt_write_args_t *args = ble_npl_event_get_arg(ev);
 
-    int rc = ble_gattc_write_no_rsp_flat(args->conn_handle, args->attr_handle,
-                                          args->data, args->len);
+    int rc = ble_gattc_write_flat(args->conn_handle, args->attr_handle,
+                                   args->data, args->len,
+                                   on_write_done, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "gatt write failed: conn=%u attr=%u rc=%d",
                  args->conn_handle, args->attr_handle, rc);

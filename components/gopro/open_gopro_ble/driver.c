@@ -107,7 +107,7 @@ void open_gopro_ble_start_discovery(void)
     memset(s_disc_list, 0, sizeof(s_disc_list));
     xSemaphoreGive(s_disc_mutex);
 
-    ble_core_start_discovery(10000 /* 10 s */);
+    ble_core_start_discovery(120000 /* 120 s */);
 }
 
 void open_gopro_ble_stop_discovery(void)

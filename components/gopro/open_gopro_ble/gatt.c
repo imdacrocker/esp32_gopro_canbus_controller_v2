@@ -1,20 +1,30 @@
 /*
- * gatt.c — MTU negotiation, service/characteristic discovery, CCCD subscription.
+ * gatt.c — Service/characteristic discovery and CCCD subscription.
  *
  * Runs entirely on the NimBLE host task.  All operations are chained through
  * NimBLE callbacks; nothing blocks.
  *
  * Flow:
  *   gopro_gatt_start_discovery()
- *     -> ble_gattc_disc_all_chrs()   [over 1..0xFFFF to catch all services]
+ *     -> ble_gattc_disc_all_svcs()   [discover all primary services]
+ *     -> on_svc_disc()               [record each service's handle range]
+ *     -> begin_chr_discovery_next()  [when BLE_HS_EDONE]
+ *     -> ble_gattc_disc_all_chrs()   [scoped to current service handle range]
  *     -> on_chr_disc()               [match each chr UUID to gatt handle table]
- *     -> gopro_gatt_subscribe_all()  [when BLE_HS_EDONE]
+ *     -> begin_chr_discovery_next()  [advance to next service, or start CCCDs]
+ *     -> gopro_gatt_write_next_cccd() [when all services done]
  *     -> on_cccd_write()             [sequential CCCD writes, one per notify/indicate chr]
  *     -> gopro_readiness_start()     [when all CCCDs written]
+ *
+ * MTU: GoPro cameras initiate the MTU exchange themselves shortly after
+ * encryption.  We rely on NimBLE's preferred-MTU kconfig
+ * (CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU) to advertise the larger MTU when the
+ * camera asks; no explicit ble_gattc_exchange_mtu() is needed.
  */
 
 #include <string.h>
 #include "esp_log.h"
+#include "host/ble_hs.h"
 #include "host/ble_gatt.h"
 #include "open_gopro_ble_internal.h"
 
@@ -22,6 +32,7 @@ static const char *TAG = "gopro_ble/gatt";
 
 /* Forward declaration — defined later in this file. */
 static void gopro_gatt_write_next_cccd(gopro_ble_ctx_t *ctx);
+static void begin_chr_discovery_next(gopro_ble_ctx_t *ctx);
 
 /* ---- Known GoPro characteristic UUID table ------------------------------- */
 
@@ -52,34 +63,36 @@ static const chr_map_entry_t k_chr_map[] = {
 };
 #define CHR_MAP_LEN  (sizeof(k_chr_map) / sizeof(k_chr_map[0]))
 
-/* ---- CCCD subscription list ---------------------------------------------- */
+/* ---- Dynamic service list ------------------------------------------------ */
+
+#define GATT_MAX_SERVICES  16
+
+typedef struct {
+    uint16_t start;
+    uint16_t end;
+} svc_range_t;
+
+static svc_range_t s_svc_list[CAMERA_MAX_SLOTS][GATT_MAX_SERVICES];
+static int         s_svc_count[CAMERA_MAX_SLOTS];
+static int         s_svc_cur[CAMERA_MAX_SLOTS];
+
+/* ---- Dynamic CCCD subscription list -------------------------------------- */
 
 /*
- * Ordered list of (val_handle field offset, CCCD value) pairs.
- * Written sequentially: cmd_resp → settings_resp → query_resp → net_mgmt_resp
- * → wifi_ap_state (indicate).
- *
- * GoPro cameras reliably place the CCCD descriptor at val_handle + 1, which
- * is the standard BLE convention for single-descriptor characteristics.
+ * Built at runtime: every 128-bit characteristic that advertises NOTIFY or
+ * INDICATE during discovery is appended here.  This subscribes to whatever
+ * the camera actually offers rather than a fixed list.
  */
+#define GATT_MAX_NOTIFY_CHRS  16
+
 typedef struct {
-    uint16_t handle_offset;  /* offset into gopro_gatt_handles_t */
+    uint16_t val_handle;
     uint16_t cccd_val;
-} subscr_entry_t;
+} notify_chr_t;
 
-static const subscr_entry_t k_subscr_list[] = {
-    { HANDLE_OFF(cmd_resp_notify),      BLE_CCCD_NOTIFY   },
-    { HANDLE_OFF(settings_resp_notify), BLE_CCCD_NOTIFY   },
-    { HANDLE_OFF(query_resp_notify),    BLE_CCCD_NOTIFY   },
-    { HANDLE_OFF(net_mgmt_resp_notify), BLE_CCCD_NOTIFY   },
-    { HANDLE_OFF(wifi_ap_state_indicate), BLE_CCCD_INDICATE },
-};
-#define SUBSCR_LIST_LEN  (sizeof(k_subscr_list) / sizeof(k_subscr_list[0]))
-
-/* ---- Per-slot subscription cursor ---------------------------------------- */
-
-/* Tracks which subscription we're writing for a given slot. */
-static int s_subscr_cur[CAMERA_MAX_SLOTS];
+static notify_chr_t s_notify_list[CAMERA_MAX_SLOTS][GATT_MAX_NOTIFY_CHRS];
+static int          s_notify_count[CAMERA_MAX_SLOTS];
+static int          s_subscr_cur[CAMERA_MAX_SLOTS];
 
 /* ---- Characteristic discovery callback ----------------------------------- */
 
@@ -89,32 +102,17 @@ static int on_chr_disc(uint16_t conn_handle, const struct ble_gatt_error *error,
     gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
 
     if (error->status == BLE_HS_EDONE) {
-        /* All characteristics discovered — start CCCD subscriptions. */
-        s_subscr_cur[ctx->slot] = 0;
-
-        uint8_t *handles = (uint8_t *)&ctx->gatt;
-        int missing = 0;
-        for (int i = 0; i < (int)CHR_MAP_LEN; i++) {
-            uint16_t h;
-            memcpy(&h, handles + k_chr_map[i].offset, sizeof(h));
-            if (h == 0) {
-                ESP_LOGW(TAG, "slot %d: characteristic at offset %u not found",
-                         ctx->slot, k_chr_map[i].offset);
-                missing++;
-            }
-        }
-        if (missing > 0) {
-            ESP_LOGW(TAG, "slot %d: %d characteristic(s) missing", ctx->slot, missing);
-        }
-
-        /* Start writing CCCDs — forward declared below */
-        gopro_gatt_write_next_cccd(ctx);
+        /* All characteristics discovered for this service — move to next. */
+        begin_chr_discovery_next(ctx);
         return 0;
     }
 
     if (error->status != 0) {
-        ESP_LOGE(TAG, "slot %d: chr discovery error 0x%04x", ctx->slot, error->status);
-        ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        ESP_LOGE(TAG, "slot %d: chr discovery error 0x%04x (svc %d/%d)",
+                 ctx->slot, error->status,
+                 s_svc_cur[ctx->slot], s_svc_count[ctx->slot]);
+        /* Advance to next service rather than aborting. */
+        begin_chr_discovery_next(ctx);
         return 0;
     }
 
@@ -128,7 +126,66 @@ static int on_chr_disc(uint16_t conn_handle, const struct ble_gatt_error *error,
             break;
         }
     }
+
+    /* Queue any 128-bit notifiable/indicatable characteristic for CCCD subscription. */
+    bool has_notify   = (chr->properties & BLE_GATT_CHR_F_NOTIFY)  != 0;
+    bool has_indicate = (chr->properties & BLE_GATT_CHR_F_INDICATE) != 0;
+    if ((has_notify || has_indicate) &&
+        chr->uuid.u.type == BLE_UUID_TYPE_128 &&
+        s_notify_count[ctx->slot] < GATT_MAX_NOTIFY_CHRS) {
+        int n = s_notify_count[ctx->slot]++;
+        s_notify_list[ctx->slot][n].val_handle = chr->val_handle;
+        s_notify_list[ctx->slot][n].cccd_val   = has_notify ? BLE_CCCD_NOTIFY : BLE_CCCD_INDICATE;
+        ESP_LOGD(TAG, "slot %d: queuing CCCD val_handle=0x%04x (%s)",
+                 ctx->slot, chr->val_handle, has_notify ? "NOTIFY" : "INDICATE");
+    }
+
     return 0;
+}
+
+/* ---- Per-service characteristic discovery -------------------------------- */
+
+static void begin_chr_discovery_next(gopro_ble_ctx_t *ctx)
+{
+    int slot = ctx->slot;
+
+    s_svc_cur[slot]++;
+
+    if (s_svc_cur[slot] >= s_svc_count[slot]) {
+        /* All services scanned — check for missing handles then start CCCDs. */
+        uint8_t *handles = (uint8_t *)&ctx->gatt;
+        int missing = 0;
+        for (int i = 0; i < (int)CHR_MAP_LEN; i++) {
+            uint16_t h;
+            memcpy(&h, handles + k_chr_map[i].offset, sizeof(h));
+            if (h == 0) {
+                ESP_LOGW(TAG, "slot %d: characteristic at offset %u not found",
+                         slot, k_chr_map[i].offset);
+                missing++;
+            }
+        }
+        if (missing > 0) {
+            ESP_LOGW(TAG, "slot %d: %d characteristic(s) missing", slot, missing);
+        }
+
+        ESP_LOGI(TAG, "slot %d: chr discovery done (%d svc(s), %d notify chr(s) queued)",
+                 slot, s_svc_count[slot], s_notify_count[slot]);
+
+        s_subscr_cur[slot] = 0;
+        gopro_gatt_write_next_cccd(ctx);
+        return;
+    }
+
+    uint16_t start = s_svc_list[slot][s_svc_cur[slot]].start;
+    uint16_t end   = s_svc_list[slot][s_svc_cur[slot]].end;
+
+    int rc = ble_gattc_disc_all_chrs(ctx->conn_handle, start, end,
+                                      on_chr_disc, ctx);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "slot %d: ble_gattc_disc_all_chrs svc %d rc=%d — skipping",
+                 slot, s_svc_cur[slot], rc);
+        begin_chr_discovery_next(ctx);
+    }
 }
 
 /* ---- CCCD write callback ------------------------------------------------- */
@@ -154,29 +211,18 @@ static int on_cccd_write(uint16_t conn_handle, const struct ble_gatt_error *erro
 
 static void gopro_gatt_write_next_cccd(gopro_ble_ctx_t *ctx)
 {
-    int cur = s_subscr_cur[ctx->slot];
+    int cur   = s_subscr_cur[ctx->slot];
+    int total = s_notify_count[ctx->slot];
 
-    if (cur >= (int)SUBSCR_LIST_LEN) {
-        /* All CCCDs written — proceed to readiness poll. */
-        ESP_LOGI(TAG, "slot %d: all CCCDs subscribed", ctx->slot);
+    if (cur >= total) {
+        ESP_LOGI(TAG, "slot %d: all CCCDs subscribed (%d)", ctx->slot, total);
         gopro_readiness_start(ctx);
         return;
     }
 
-    const subscr_entry_t *e = &k_subscr_list[cur];
-    uint8_t *handles = (uint8_t *)&ctx->gatt;
-    uint16_t val_handle;
-    memcpy(&val_handle, handles + e->handle_offset, sizeof(uint16_t));
-
-    if (val_handle == 0) {
-        /* Characteristic not found on this camera — skip. */
-        s_subscr_cur[ctx->slot]++;
-        gopro_gatt_write_next_cccd(ctx);
-        return;
-    }
-
-    uint16_t cccd_handle = val_handle + 1;  /* CCCD is at val_handle + 1 on GoPro */
-    uint16_t cccd_val    = e->cccd_val;
+    uint16_t val_handle  = s_notify_list[ctx->slot][cur].val_handle;
+    uint16_t cccd_handle = val_handle + 1;
+    uint16_t cccd_val    = s_notify_list[ctx->slot][cur].cccd_val;
 
     int rc = ble_gattc_write_flat(ctx->conn_handle, cccd_handle,
                                    &cccd_val, sizeof(cccd_val),
@@ -189,21 +235,57 @@ static void gopro_gatt_write_next_cccd(gopro_ble_ctx_t *ctx)
     }
 }
 
+/* ---- Service discovery callback ------------------------------------------ */
+
+static int on_svc_disc(uint16_t conn_handle, const struct ble_gatt_error *error,
+                        const struct ble_gatt_svc *svc, void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    int slot = ctx->slot;
+
+    if (error->status == BLE_HS_EDONE) {
+        ESP_LOGI(TAG, "slot %d: service discovery done — %d service(s) found",
+                 slot, s_svc_count[slot]);
+        /* Initialise cursor to -1 so begin_chr_discovery_next() increments to 0. */
+        s_svc_cur[slot] = -1;
+        begin_chr_discovery_next(ctx);
+        return 0;
+    }
+
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "slot %d: service discovery error 0x%04x", slot, error->status);
+        ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return 0;
+    }
+
+    if (s_svc_count[slot] < GATT_MAX_SERVICES) {
+        ESP_LOGD(TAG, "slot %d: svc start=0x%04x end=0x%04x",
+                 slot, svc->start_handle, svc->end_handle);
+        s_svc_list[slot][s_svc_count[slot]].start = svc->start_handle;
+        s_svc_list[slot][s_svc_count[slot]].end   = svc->end_handle;
+        s_svc_count[slot]++;
+    }
+
+    return 0;
+}
+
 /* ---- Entry point --------------------------------------------------------- */
 
 void gopro_gatt_start_discovery(gopro_ble_ctx_t *ctx)
 {
     memset(&ctx->gatt, 0, sizeof(ctx->gatt));
-    s_subscr_cur[ctx->slot] = 0;
+    memset(s_svc_list[ctx->slot], 0, sizeof(s_svc_list[ctx->slot]));
+    s_svc_count[ctx->slot]  = 0;
+    s_svc_cur[ctx->slot]    = 0;
+    memset(s_notify_list[ctx->slot], 0, sizeof(s_notify_list[ctx->slot]));
+    s_notify_count[ctx->slot] = 0;
+    s_subscr_cur[ctx->slot]   = 0;
 
-    ESP_LOGI(TAG, "slot %d: starting chr discovery mtu=%d",
-             ctx->slot, ctx->negotiated_mtu);
+    ESP_LOGI(TAG, "slot %d: starting service discovery", ctx->slot);
 
-    int rc = ble_gattc_disc_all_chrs(ctx->conn_handle,
-                                      1, 0xFFFF,
-                                      on_chr_disc, ctx);
+    int rc = ble_gattc_disc_all_svcs(ctx->conn_handle, on_svc_disc, ctx);
     if (rc != 0) {
-        ESP_LOGE(TAG, "slot %d: ble_gattc_disc_all_chrs rc=%d", ctx->slot, rc);
+        ESP_LOGE(TAG, "slot %d: ble_gattc_disc_all_svcs rc=%d", ctx->slot, rc);
         ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
 }

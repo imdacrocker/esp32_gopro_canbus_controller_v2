@@ -130,33 +130,35 @@ static const uint8_t k_gopro_keepalive_pkt[2] = { 0x01u, GOPRO_CMD_KEEPALIVE };
 
 /*
  * Command response layout (reassembled GPBS payload):
- *   [0]: response marker (0x02 = command response)
- *   [1]: command ID (echoes the request cmd ID)
- *   [2]: result code (0x00 = success)
- *   [3..]: TLV parameter data (command-specific)
+ *   [0]: command/setting ID (echoes the request)
+ *   [1]: command status (0x00 = success)
+ *   [2..]: optional response data (command-specific TLV parameters)
+ *
+ * Spec: https://gopro.github.io/OpenGoPro/ble/protocol/data_protocol.html#command-response
  */
-#define GOPRO_RESP_HDR_LEN     3u
-#define GOPRO_RESP_MARKER      0x02u
-#define GOPRO_RESP_CMD_IDX     1u
-#define GOPRO_RESP_STATUS_IDX  2u
+#define GOPRO_RESP_HDR_LEN     2u
+#define GOPRO_RESP_CMD_IDX     0u
+#define GOPRO_RESP_STATUS_IDX  1u
 #define GOPRO_RESP_STATUS_OK   0x00u
 
-/* ---- GetHardwareInfo response TLV parameter IDs -------------------------- */
+/* ---- GetHardwareInfo response body layout -------------------------------- */
 
 /*
- * TLV parameters in GetHardwareInfo response body (after 3-byte response header):
- *   0x01: manufacturer name (string)
- *   0x02: model number (uint32_t, big-endian) ← maps to camera_model_t
- *   0x03: model name (string)
- *   0x04: board type (string)
- *   0x05: firmware version (string)
- *   0x06: serial number (string)
- *   0x07: AP SSID (string)
- *   0x08: AP MAC address (6 bytes)
+ * The body is a sequence of positional length-value fields (NOT TLV).
+ * Each field is [len (1B), value (len B)], in this fixed order:
+ *
+ *   1) model number   (uint32_t, big-endian) ← maps to camera_model_t
+ *   2) model name     (string)
+ *   3) deprecated     (string, ignored)
+ *   4) firmware       (string)
+ *   5) serial number  (string)
+ *   6) AP SSID        (string)
+ *   7) AP MAC address (6 raw bytes)
+ *
+ * Parsing lives in readiness.c (parse_and_log_hw_info).
  *
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/query.html#get-hardware-info
  */
-#define GOPRO_HWINFO_PARAM_MODEL_NUM  0x02u
 
 /* ---- Network management (COHN) protobuf encoding ------------------------- */
 

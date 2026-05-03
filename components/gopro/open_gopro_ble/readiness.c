@@ -10,6 +10,7 @@
  * is rescheduled on the timer task and posts work back via ble_core_gatt_write().
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include "esp_log.h"
@@ -22,36 +23,114 @@ static const char *TAG = "gopro_ble/ready";
 /* GetHardwareInfo packet: GPBS general header len=1, cmd=0x3C */
 static const uint8_t k_get_hwinfo_pkt[2] = { 0x01u, GOPRO_CMD_GET_HARDWARE_INFO };
 
-/* ---- TLV parser ---------------------------------------------------------- */
+/* ---- GetHardwareInfo response payload parser ----------------------------- */
 
 /*
- * Walk a TLV-encoded parameter block starting at data[offset].
- * Returns the uint32_t value of the first parameter whose ID matches target_id,
- * or 0 if not found.
+ * The GetHardwareInfo response body is a sequence of positional length-value
+ * fields (NOT type-length-value).  Each field is [len (1B), value (len B)],
+ * and fields appear in a fixed order:
  *
- * TLV format per parameter: [id (1B), len (1B), value (len B)]
+ *   1) model number   (uint32_t, big-endian)
+ *   2) model name     (string)
+ *   3) deprecated     (string, ignored)
+ *   4) firmware       (string)
+ *   5) serial number  (string)
+ *   6) AP SSID        (string)
+ *   7) AP MAC address (6 raw bytes)
+ *
+ * Spec: https://gopro.github.io/OpenGoPro/ble/features/query.html#get-hardware-info
  */
-static uint32_t tlv_find_u32(const uint8_t *data, uint16_t len,
-                              uint8_t target_id)
+
+/* Consume one LV string field; returns bytes consumed or 0 on error. */
+static int lv_take_string(const uint8_t *data, uint16_t remaining,
+                           char *out, size_t out_size)
 {
-    uint16_t pos = 0;
-    while (pos + 2 <= len) {
-        uint8_t  id  = data[pos];
-        uint8_t  plen = data[pos + 1];
-        pos += 2;
-        if (pos + plen > len) {
-            break;
-        }
-        if (id == target_id && plen >= 1 && plen <= 4) {
-            uint32_t val = 0;
-            for (int i = 0; i < plen; i++) {
-                val = (val << 8) | data[pos + i];
-            }
-            return val;
-        }
-        pos += plen;
+    if (remaining < 1) {
+        return 0;
     }
-    return 0;
+    uint8_t flen = data[0];
+    if ((uint16_t)(1 + flen) > remaining) {
+        return 0;
+    }
+    size_t copy = (flen < out_size - 1) ? flen : out_size - 1;
+    memcpy(out, &data[1], copy);
+    out[copy] = '\0';
+    return 1 + flen;
+}
+
+/* Consume one LV uint field (1–4 bytes, big-endian); returns bytes consumed or 0. */
+static int lv_take_uint(const uint8_t *data, uint16_t remaining, uint32_t *out)
+{
+    if (remaining < 1) {
+        return 0;
+    }
+    uint8_t flen = data[0];
+    if ((uint16_t)(1 + flen) > remaining || flen == 0 || flen > 4) {
+        return 0;
+    }
+    uint32_t v = 0;
+    for (int i = 0; i < flen; i++) {
+        v = (v << 8) | data[1 + i];
+    }
+    *out = v;
+    return 1 + flen;
+}
+
+/*
+ * Parse the GetHardwareInfo response body, log the human-readable fields,
+ * and return the model number (0 if it could not be parsed).
+ */
+static uint32_t parse_and_log_hw_info(int slot, const uint8_t *body, uint16_t len)
+{
+    char     model_name[32] = {0};
+    char     deprecated[32] = {0};
+    char     firmware[32]   = {0};
+    char     serial[24]     = {0};
+    char     ap_ssid[24]    = {0};
+    uint32_t model_num      = 0;
+    uint16_t i              = 0;
+    int      n;
+
+    n = lv_take_uint(&body[i], len - i, &model_num);
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    n = lv_take_string(&body[i], len - i, model_name, sizeof(model_name));
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    n = lv_take_string(&body[i], len - i, deprecated, sizeof(deprecated));
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    n = lv_take_string(&body[i], len - i, firmware, sizeof(firmware));
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    n = lv_take_string(&body[i], len - i, serial, sizeof(serial));
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    n = lv_take_string(&body[i], len - i, ap_ssid, sizeof(ap_ssid));
+    if (n == 0) goto out;
+    i += (uint16_t)n;
+
+    /* AP MAC: 1-byte length followed by raw bytes — format as XX:XX:... */
+    char ap_mac[24] = {0};
+    if (i < len) {
+        uint8_t mlen = body[i++];
+        if ((uint16_t)(i + mlen) <= len && mlen <= 8) {
+            char *p = ap_mac;
+            for (int b = 0; b < mlen && (p - ap_mac) + 4 < (int)sizeof(ap_mac); b++) {
+                p += sprintf(p, "%s%02X", b == 0 ? "" : ":", body[i + b]);
+            }
+        }
+    }
+
+out:
+    ESP_LOGI(TAG, "slot %d GetHardwareInfo: model=%u (%s)  fw=%s  sn=%s  ssid=%s  mac=%s",
+             slot, (unsigned)model_num, model_name, firmware, serial, ap_ssid, ap_mac);
+    return model_num;
 }
 
 /* ---- gopro_on_camera_ready (§15.5) --------------------------------------- */
@@ -123,10 +202,10 @@ void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
     ctx->readiness_polling = false;
     esp_timer_stop(ctx->readiness_timer);
 
-    /* Parse model number from TLV body (starts after 3-byte response header). */
-    uint32_t model_num = tlv_find_u32(data + GOPRO_RESP_HDR_LEN,
-                                       len - GOPRO_RESP_HDR_LEN,
-                                       GOPRO_HWINFO_PARAM_MODEL_NUM);
+    /* Parse and log the LV body that follows the [cmd_id][status] header. */
+    uint32_t model_num = parse_and_log_hw_info(ctx->slot,
+                                                data + GOPRO_RESP_HDR_LEN,
+                                                len - GOPRO_RESP_HDR_LEN);
     gopro_on_camera_ready(ctx, model_num);
 }
 

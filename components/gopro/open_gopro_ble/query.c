@@ -62,14 +62,17 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
 
     switch (chan) {
     case GOPRO_CHAN_CMD:
-        /* Command response: data[1] = command ID that was echoed. */
-        if (len >= 2 && data[GOPRO_RESP_CMD_IDX] == GOPRO_CMD_GET_HARDWARE_INFO) {
+        /* Command response: data[0] = command ID that was echoed. */
+        if (len >= GOPRO_RESP_HDR_LEN &&
+            data[GOPRO_RESP_CMD_IDX] == GOPRO_CMD_GET_HARDWARE_INFO) {
             gopro_readiness_on_response(ctx, data, len);
         } else {
             /* Other command responses (SetDateTime, etc.) — log status only. */
             if (len >= GOPRO_RESP_HDR_LEN) {
                 ESP_LOGD(TAG, "slot %d: cmd resp cmd=0x%02x status=0x%02x",
-                         ctx->slot, data[1], data[2]);
+                         ctx->slot,
+                         data[GOPRO_RESP_CMD_IDX],
+                         data[GOPRO_RESP_STATUS_IDX]);
             }
         }
         break;
@@ -78,7 +81,9 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         /* Keepalive and settings responses — acknowledge and discard. */
         if (len >= GOPRO_RESP_HDR_LEN) {
             ESP_LOGD(TAG, "slot %d: settings resp cmd=0x%02x status=0x%02x",
-                     ctx->slot, data[1], data[2]);
+                     ctx->slot,
+                     data[GOPRO_RESP_CMD_IDX],
+                     data[GOPRO_RESP_STATUS_IDX]);
         }
         break;
 

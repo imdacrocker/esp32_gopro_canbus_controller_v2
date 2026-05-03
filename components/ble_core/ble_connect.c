@@ -14,7 +14,7 @@ static const char *TAG = "ble_core";
 /* ATT MTU ceiling that matches CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517.
    Sized to hold the largest known GoPro response (~88 bytes for GetHardwareInfoRsp)
    with headroom to spare. */
-#define NOTIFY_BUF_SIZE 512
+#define NOTIFY_BUF_SIZE 517
 
 /* ---------------------------------------------------------------------------
  * Helpers

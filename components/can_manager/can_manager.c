@@ -78,7 +78,7 @@ static struct {
     int64_t  last_esp_us;   /* esp_timer_get_time() snapshot at last 0x602 */
 } s_utc;
 
-static int8_t s_tz_offset = 0;
+static int8_t s_tz_offset = -7; /* Default to -1 for my home zone.  Sorry rest of the world :P */
 
 static esp_timer_handle_t s_tx_timer;
 static esp_timer_handle_t s_watchdog_timer;
