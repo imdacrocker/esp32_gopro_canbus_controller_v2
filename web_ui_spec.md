@@ -378,13 +378,14 @@ Clicking the overlay backdrop (not the modal card) also closes the modal.
   - Labels: "UTC-12" … "UTC" … "UTC+14"
   - On change: `POST /api/settings/timezone` with `{ tz_offset_hours: int }`
   - On open: `GET /api/settings/timezone` → sets selected value
-- **Set Date & Time row** — only rendered when `gps_valid == false` (checked at modal open via `GET /api/utc`):
+- **Set Date & Time row** — only rendered when `session_synced == false` (checked at modal open via `GET /api/utc`):
   - Label "Set Date & Time" left, `<button>` "Set from Device" right
   - Button style: blue outline, `0.85rem`, `min-height: 36px`, `border-radius: 6px`
   - On tap: reads `Date.now()` from the browser, `POST /api/settings/datetime` with `{ epoch_ms: number }`
   - On success: brief inline confirmation "Time set ✓" replaces button for 2 s, then restores
   - On error: inline "Failed — try again" in red for 2 s
-  - Row is hidden (not just disabled) when GPS is providing valid UTC, so it does not clutter the UI during normal race operation
+  - Row is hidden (not just disabled) once a live source has set time this session, so it does not clutter the UI during normal race operation
+  - Note: the firmware persists UTC across reboots, so `valid` may be `true` (NVS-restored) while `session_synced` is still `false`. The row must gate on `session_synced` — gating on `valid` would hide the row even when the only available time is a stale boot-time restore
 
 **Reboot button:**
 ```
@@ -515,7 +516,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | Method | Path | Request body | Response body | Notes |
 |---|---|---|---|---|
 | GET | `/api/logging-state` | — | `{ state: "logging"\|"not_logging"\|"unknown" }` | |
-| GET | `/api/utc` | — | `{ valid: bool, epoch_ms: int }` | epoch_ms has tz offset applied |
+| GET | `/api/utc` | — | `{ valid: bool, session_synced: bool, epoch_ms: int }` | epoch_ms has tz offset applied. `valid` is true whenever any anchor is available (incl. NVS-restored at boot). `session_synced` is true only after a live source — GPS frame or manual web set — won this boot session. |
 | GET | `/api/auto-control` | — | `{ enabled: bool }` | |
 | POST | `/api/auto-control` | `{ enabled: bool }` | `{ enabled: bool }` | |
 | GET | `/api/cameras` | — | `[{ name, addr, addr_type, rssi }]` | BLE scan results |
@@ -531,7 +532,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |
 | GET | `/api/settings/timezone` | — | `{ tz_offset_hours: int }` | |
 | POST | `/api/settings/timezone` | `{ tz_offset_hours: int }` | `{}` | |
-| POST | `/api/settings/datetime` | `{ epoch_ms: number }` | `{}` | Only valid when `gps_valid == false`; sets system time from browser clock; triggers `open_gopro_ble_sync_time_all()` |
+| POST | `/api/settings/datetime` | `{ epoch_ms: number }` | `{}` | Only accepted when `session_synced == false` (no live source has won yet — NVS-restored boot value does not block manual entry). Sets system time from browser clock; triggers `open_gopro_ble_sync_time_all()` and `gopro_wifi_rc_sync_time_all()`. |
 
 ---
 

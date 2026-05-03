@@ -45,16 +45,20 @@ static esp_err_t handler_logging_state(httpd_req_t *req)
 static esp_err_t handler_utc(httpd_req_t *req)
 {
     uint64_t utc_ms = 0;
-    bool valid = can_manager_get_utc_ms(&utc_ms);
-    char buf[64];
+    bool valid          = can_manager_get_utc_ms(&utc_ms);
+    bool session_synced = can_manager_utc_is_session_synced();
+    char buf[96];
     if (valid) {
         /* Apply timezone offset (§14.3). */
         int8_t tz = can_manager_get_tz_offset();
         utc_ms += (int64_t)tz * 3600LL * 1000LL;
         snprintf(buf, sizeof(buf),
-                 "{\"valid\":true,\"epoch_ms\":%llu}", (unsigned long long)utc_ms);
+                 "{\"valid\":true,\"session_synced\":%s,\"epoch_ms\":%llu}",
+                 session_synced ? "true" : "false",
+                 (unsigned long long)utc_ms);
     } else {
-        snprintf(buf, sizeof(buf), "{\"valid\":false,\"epoch_ms\":0}");
+        snprintf(buf, sizeof(buf),
+                 "{\"valid\":false,\"session_synced\":false,\"epoch_ms\":0}");
     }
     send_json(req, buf);
     return ESP_OK;

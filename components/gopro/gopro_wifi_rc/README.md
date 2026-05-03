@@ -15,14 +15,14 @@ Recording commands travel over plain HTTP/1.0 (port 80). Camera presence is main
 - **HTTP probe**: after DHCP is assigned, verify the camera is responsive on port 80 before marking the slot WiFi-ready (up to 3 retries at 2-second intervals).
 - **Shutter commands**: send `/gp/gpControl/command/shutter?p=1` and `?p=0` to all WiFi-ready slots (sequentially, high-priority shutter task).
 - **Status polling**: poll `/gp/gpControl/status` every 5 seconds on all WiFi-ready slots; parse the `"8"` field from the `"status"` JSON object to update the recording state cache.
-- **Datetime sync**: send the current UTC time to all WiFi-ready cameras via `/gp/gpControl/command/setup/date_time`; requires the system clock to be set by `can_manager` on GPS lock.
+- **Datetime sync**: send the current UTC time to all WiFi-ready cameras via `/gp/gpControl/command/setup/date_time`. Internally gated on `can_manager_utc_is_session_synced()` — only fires after a live source (CAN GPS frame or web-UI manual set) has won this boot session. An NVS-restored UTC at boot leaves the camera's own clock untouched.
 
 ---
 
 ## Dependencies
 
 ```
-REQUIRES: camera_manager, wifi_manager, esp_timer, freertos, lwip, esp_wifi
+REQUIRES: camera_manager, can_manager, wifi_manager, esp_timer, freertos, lwip, esp_wifi
 ```
 
 **Precondition:** `camera_manager_init()` must be called before `gopro_wifi_rc_init()`.  
@@ -67,7 +67,9 @@ void gopro_wifi_rc_remove_camera(int slot);
 bool gopro_wifi_rc_is_managed_slot(int slot);
 bool gopro_wifi_rc_is_managed_mac(const uint8_t mac[6]);
 
-/* UTC sync — called from main.c on_utc_acquired (can_manager GPS lock) */
+/* UTC sync — called from main.c on_utc_acquired (first live UTC source this
+ * session: CAN GPS frame or web-UI manual set).  Per-slot rc_send_datetime()
+ * is internally a no-op until can_manager reports session-synced UTC. */
 void gopro_wifi_rc_sync_time_all(void);
 ```
 
@@ -150,6 +152,6 @@ All three tasks are pinned to **core 0** to share the WiFi/lwIP stack without cr
 | Location | Issue |
 |----------|-------|
 | `gopro_wifi_rc_spec.h` | Verify that JSON field `"30"` is the camera name on Hero 4; may need `/gp/gpControl/info` instead |
-| `command.c` | `rc_send_datetime()` sends UTC only; no timezone offset from `can_manager` |
+| `command.c` | `rc_send_datetime()` sends UTC only; no timezone offset applied from `can_manager_get_tz_offset()` |
 | `gopro_wifi_rc.h` | `gopro_wifi_rc_add_camera()` defaults to `CAMERA_MODEL_GOPRO_HERO4_BLACK`; model picker in web UI is not yet implemented |
 | `settings.c` | `last_ip` NVS persistence not yet implemented; cameras always start with `last_ip = 0` after reboot |

@@ -64,10 +64,21 @@ can_logging_state_t can_manager_get_logging_state(void);
 
 /*
  * Returns the estimated current UTC as a Unix epoch in milliseconds,
- * extrapolated from the last received 0x602 frame using esp_timer_get_time().
- * Returns false (and leaves *out_ms unchanged) until the first valid frame.
+ * extrapolated from the last known UTC anchor using esp_timer_get_time().
+ * The anchor is set by either a 0x602 GPS frame, a manual web-UI set, or
+ * (at boot) a value restored from NVS — so this can return true with an
+ * NVS-restored value before any live sync has occurred this session.
+ * Returns false (and leaves *out_ms unchanged) if no anchor is available.
  */
 bool can_manager_get_utc_ms(uint64_t *out_ms);
+
+/*
+ * True only if UTC has been synced live this session by either a 0x602 GPS
+ * frame or a successful can_manager_set_manual_utc_ms() call.  An NVS-restored
+ * value at boot does NOT count.  Use this to gate operations that require
+ * authoritative time (e.g. pushing SetDateTime to a camera).
+ */
+bool can_manager_utc_is_session_synced(void);
 
 /*
  * Persist a UTC-to-local offset in NVS (§14.3).

@@ -12,11 +12,11 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "open_gopro_ble_internal.h"
 #include "gopro_model.h"
+#include "can_manager.h"
 
 static const char *TAG = "gopro_ble/ready";
 
@@ -159,8 +159,12 @@ void gopro_on_camera_ready(gopro_ble_ctx_t *ctx, uint32_t model_num)
     } else {
         /* Need to provision COHN. */
         gopro_control_set_datetime(ctx);
-        /* Is UTC available?  Treat any timestamp after 2020-01-01 as synced. */
-        bool utc_ok = (time(NULL) > 1577836800LL);
+        /* Need a UTC anchor for COHN cert generation.  An NVS-restored value
+         * is good enough here (cert validity windows are months).  Live sync
+         * is only required for pushing time to the camera, gated separately
+         * inside gopro_control_set_datetime(). */
+        uint64_t utc_ms;
+        bool utc_ok = can_manager_get_utc_ms(&utc_ms);
 
         if (utc_ok) {
             gopro_keepalive_start(ctx);

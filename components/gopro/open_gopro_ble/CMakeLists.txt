@@ -20,5 +20,6 @@ idf_component_register(
         esp_wifi
         freertos
         camera_manager
+        can_manager
         ble_core
 )

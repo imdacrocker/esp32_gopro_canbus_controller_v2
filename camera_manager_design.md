@@ -974,13 +974,36 @@ This function is defined in `camera_manager` and translates the slot's `wifi_sta
 
 **`0x602` — RaceCapture → ESP32: GPS UTC timestamp**
 
-A 64-bit little-endian Unix epoch in milliseconds, broadcast by a RaceCapture Lua script at 25 Hz once GPS lock is acquired. The first valid frame (year > 2020) fires the `can_utc_acquired_cb_t` callback exactly once — used to set the date and time on all currently-connected cameras. Subsequent frames update the stored epoch and the monotonic clock reference used for extrapolation.
+A 64-bit little-endian Unix epoch in milliseconds, broadcast by a RaceCapture Lua script at 25 Hz once GPS lock is acquired. The first valid frame (year > 2020) of a boot session fires the `can_utc_acquired_cb_t` callback exactly once — used to set the date and time on all currently-connected cameras. Subsequent frames update the stored epoch and the monotonic clock reference used for extrapolation.
 
-`can_manager_get_utc_ms()` uses the last received timestamp plus elapsed `esp_timer_get_time()` to return the current estimated UTC without waiting for the next CAN frame. Returns `false` until the first valid frame arrives.
+The UTC anchor tracks two flags:
 
-### 14.3 Timezone Offset
+- `valid` — any anchor is available, including one restored from NVS on boot.
+- `session_synced` — the anchor came from a live source **this** boot session: either a `0x602` GPS frame or a successful `can_manager_set_manual_utc_ms()` call from the web UI. An NVS-restored value does **not** set this flag.
 
-`can_manager_set_tz_offset(int8_t hours)` stores a UTC offset (clamped to the IANA valid range of −12 to +14 hours) in NVS. This offset is applied when setting camera date/time so recorded clips have correct local timestamps. The value is loaded from NVS on `can_manager_init()` before any camera clock operations.
+`can_manager_get_utc_ms()` uses the current anchor plus elapsed `esp_timer_get_time()` to return the estimated UTC without waiting for the next CAN frame. Returns `false` only when no anchor exists at all (first-ever boot with no GPS lock and no manual set yet).
+
+`can_manager_utc_is_session_synced()` returns `true` only after a live source has set the anchor this session. It is the gate used by camera drivers to decide whether to push `SetDateTime` to a connected camera — an NVS-restored value is "close" but not authoritative, so we'd rather leave the camera's own clock alone than overwrite it with a stale value.
+
+When a live UTC source updates the anchor, `can_manager` also calls `settimeofday()` so libc clock APIs (`time()`, `gettimeofday()`) used elsewhere return useful values. The same call is made during NVS restore so the system clock comes up approximately correct without a GPS fix.
+
+### 14.3 NVS Persistence
+
+`can_manager` owns the namespace `can_mgr` with two keys:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `tz_off` | `i8` | UTC offset in whole hours, clamped to IANA valid range `[−12, +14]` |
+| `last_utc` | `u64` | Most recent best-estimate UTC (ms since epoch) for cross-boot continuity |
+
+`tz_off` is applied when setting camera date/time so recorded clips have correct local timestamps. Loaded on `can_manager_init()` before any camera clock operations.
+
+`last_utc` is written:
+
+1. Immediately on the first session sync (live GPS frame or manual set).
+2. Every 5 minutes thereafter, while the anchor is valid, by a periodic `esp_timer`.
+
+On `can_manager_init()` the saved value is loaded into the in-memory anchor and pushed to the system clock. The anchor is marked `valid` but **not** `session_synced` — so the device boots with an approximately correct clock for COHN cert generation, log timestamps, etc., while still treating live sync as authoritative for camera time-pushes. Drift during power-off is unrecoverable; the persisted value is "the last thing we knew before losing power", which is as close as we can get without an RTC.
 
 ### 14.4 Threading Model
 
@@ -992,7 +1015,7 @@ A single FreeRTOS task (`s_rx_task`, priority 5) dequeues frames from `s_rx_queu
 |---|---|
 | `can_rx_frame_cb_t` | Every received frame — for development and bus sniffing |
 | `can_logging_state_cb_t` | Every received `0x600` frame (consumer is responsible for idempotency — see §13.2) |
-| `can_utc_acquired_cb_t` | Exactly once, on the first valid `0x602` frame |
+| `can_utc_acquired_cb_t` | Exactly once per boot session — on the first valid `0x602` frame **or** the first successful `can_manager_set_manual_utc_ms()` call. NVS-restored anchors at boot do not fire it. |
 
 All callbacks are invoked from the RX task context. Implementations must not block indefinitely.
 
@@ -1098,21 +1121,25 @@ gopro_on_camera_ready()
   -> check cam_N/gopro_cohn in NVS:
 
       credentials present
-        -> UTC available?
-            yes -> SetDateTime (best-effort, no retry)
-            no  -> skip (camera retains its own clock; sync deferred to sync_time_all())
+        -> SetDateTime (best-effort, no retry; internally skipped unless
+                         can_manager_utc_is_session_synced())
         -> camera_manager_set_camera_ready(slot, true)
         -> BLE keepalive timer running (3 s periodic, GP-0074)
         -> recording commands dispatched via open_gopro_http (HTTPS)
 
       credentials absent OR re-provisioning requested
-        -> UTC available?
-            yes -> SetDateTime -> run COHN provisioning sequence (section 15.6)
+        -> SetDateTime (gated on session-synced UTC; see above)
+        -> any UTC anchor available (can_manager_get_utc_ms == true)?
+            yes -> run COHN provisioning sequence (section 15.6)
+                   (NVS-restored UTC is good enough for cert generation —
+                    cert validity windows are months, so a few hours of drift
+                    is harmless)
             no  -> set ctx->cohn_pending_utc = true
                   BLE keepalive timer running (camera must not sleep while we wait)
                   camera sits in BLE-connected / not-ready state
 
-open_gopro_ble_sync_time_all()   [called by CAN manager on GPS lock, or by web UI manual set]
+open_gopro_ble_sync_time_all()   [called by main.c on first session UTC sync —
+                                  GPS lock or web UI manual set]
   -> for every connected slot:
       send SetDateTime (best-effort)
       if ctx->cohn_pending_utc:
@@ -1196,7 +1223,10 @@ bool open_gopro_ble_get_cohn_credentials(int slot,
 /* Re-provisioning — called by open_gopro_http on repeated HTTPS 401 */
 void open_gopro_ble_reprovision(int slot);
 
-/* UTC sync — called from can_manager UTC-acquired callback */
+/* UTC sync — called from main.c on first live UTC sync (GPS or manual web set);
+ * pushes SetDateTime to every connected slot and unblocks any cohn_pending_utc.
+ * No-op for any slot when can_manager_utc_is_session_synced() is false (so an
+ * NVS-restored value at boot will not trigger camera time updates). */
 void open_gopro_ble_sync_time_all(void);
 
 /* Driver context lifecycle */
@@ -1789,7 +1819,7 @@ All handlers follow the same structure: parse request -> call one component API 
 | `POST /api/rc/add` | `gopro_wifi_rc_add_camera()` |
 | `GET /api/settings/timezone` | `can_manager_get_tz_offset_hours()` |
 | `POST /api/settings/timezone` | `can_manager_set_tz_offset()` |
-| `POST /api/settings/datetime` | `can_manager_set_manual_utc_ms()` -> fires UTC-acquired path |
+| `POST /api/settings/datetime` | `can_manager_set_manual_utc_ms()` -> fires UTC-acquired path. Rejected with `ESP_ERR_INVALID_STATE` only after a live source has already won this session; an NVS-restored anchor at boot does not block manual entry. |
 | `POST /api/reboot` | `esp_restart()` |
 | `POST /api/factory-reset` | NVS erase all -> `esp_restart()` |
 
@@ -1966,7 +1996,7 @@ static const can_callbacks_t s_can_callbacks = {
 };
 ```
 
-`on_utc_acquired` fires exactly once — on the first valid GPS timestamp from RaceCapture. Both camera types are notified simultaneously. `open_gopro_ble_sync_time_all()` also unblocks any slots with `cohn_pending_utc` set (section 15.5).
+`on_utc_acquired` fires exactly once per boot session — on the first valid GPS timestamp from RaceCapture **or** the first successful manual web-UI set, whichever comes first. NVS-restored UTC at boot does not fire it. Both camera types are notified simultaneously. `open_gopro_ble_sync_time_all()` also unblocks any slots with `cohn_pending_utc` set (section 15.5).
 
 #### WiFi callbacks (`s_wifi_callbacks`)
 

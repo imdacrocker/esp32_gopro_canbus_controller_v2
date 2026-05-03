@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "open_gopro_ble_internal.h"
+#include "can_manager.h"
 
 static const char *TAG = "gopro_ble/ctrl";
 
@@ -45,6 +46,16 @@ static const char *TAG = "gopro_ble/ctrl";
 void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
 {
     if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        return;
+    }
+
+    /* Only push time to the camera when UTC has been live-synced this session
+     * (CAN GPS frame or web-UI manual set).  An NVS-restored value at boot
+     * is "close" but not authoritative — we'd rather let the camera keep its
+     * own clock than push a stale value. */
+    if (!can_manager_utc_is_session_synced()) {
+        ESP_LOGD(TAG, "slot %d: SetDateTime deferred — UTC not session-synced",
+                 ctx->slot);
         return;
     }
 

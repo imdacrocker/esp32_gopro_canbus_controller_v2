@@ -281,9 +281,12 @@ function openSettings() {
         document.getElementById('tz-select').value = d.tz_offset_hours;
     }).catch(() => {});
 
-    // Show Set Date & Time row only when GPS is not valid
+    // Show Set Date & Time row only when no live source has set time this
+    // session. d.valid alone is not sufficient — firmware persists UTC across
+    // reboots, so an NVS-restored boot value would otherwise hide the row
+    // even though the user might want to enter a fresh time.
     apiFetch('GET', '/api/utc').then(d => {
-        document.getElementById('datetime-row').style.display = d.valid ? 'none' : 'flex';
+        document.getElementById('datetime-row').style.display = d.session_synced ? 'none' : 'flex';
     }).catch(() => {});
 }
 

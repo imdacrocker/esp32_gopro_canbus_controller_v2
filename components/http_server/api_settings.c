@@ -61,8 +61,10 @@ static esp_err_t handler_post_timezone(httpd_req_t *req)
 
 /* ---- POST /api/settings/datetime ----------------------------------------- */
 /*
- * Only valid when GPS time is not yet acquired.  Sets the system clock from
- * the browser and fires the UTC-acquired path (time sync to all cameras).
+ * Sets the system clock from the browser and fires the UTC-acquired path
+ * (time sync to all cameras).  Rejected only when a live source — GPS frame
+ * or a previous manual set this session — has already won; an NVS-restored
+ * value at boot does not block manual entry.
  */
 static esp_err_t handler_post_datetime(httpd_req_t *req)
 {
@@ -85,9 +87,9 @@ static esp_err_t handler_post_datetime(httpd_req_t *req)
 
     esp_err_t err = can_manager_set_manual_utc_ms(utc_ms);
     if (err == ESP_ERR_INVALID_STATE) {
-        /* GPS time already valid — manual override not permitted. */
+        /* A live source already won this session — manual override not permitted. */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "GPS time already acquired");
+                            "UTC already synced this session");
         return ESP_FAIL;
     }
     if (err != ESP_OK) {

@@ -20,6 +20,7 @@ static void on_gps_utc_acquired(uint64_t utc_ms, void *arg)
 {
     (void)utc_ms; (void)arg;
     open_gopro_ble_sync_time_all();
+    gopro_wifi_rc_sync_time_all();
 }
 
 /* ---- WiFi station callbacks (§21.3) -------------------------------------- */

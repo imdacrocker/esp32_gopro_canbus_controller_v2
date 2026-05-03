@@ -13,6 +13,7 @@ idf_component_register(
         ".."
     REQUIRES
         camera_manager
+        can_manager
         wifi_manager
         esp_timer
         freertos

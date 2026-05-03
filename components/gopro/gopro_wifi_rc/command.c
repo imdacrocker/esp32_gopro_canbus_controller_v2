@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "camera_manager.h"
+#include "can_manager.h"
 #include "gopro_wifi_rc_internal.h"
 
 static const char *TAG = "gopro_rc/cmd";
@@ -162,27 +163,28 @@ void rc_shutter_task(void *arg)
 
 /*
  * Send the current local time to a single slot's camera.
- * Uses time() / gmtime_r() — these return useful values only after the system
- * clock has been set by can_manager on the first GPS UTC frame.
+ * Skipped unless UTC has been live-synced this session by either the CAN
+ * 0x602 frame or a manual web-UI set.  An NVS-restored UTC at boot does NOT
+ * unlock this path — we'd rather leave the camera's own clock alone than
+ * overwrite it with a stale value.
  *
- * TODO: apply the per-device timezone offset from can_manager once can_manager
- * is built (currently sends UTC).
+ * TODO: apply the per-device timezone offset from can_manager (currently
+ * sends UTC).
  */
 void rc_send_datetime(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
     if (!ctx->last_ip) return;
 
+    if (!can_manager_utc_is_session_synced()) {
+        ESP_LOGD(TAG, "slot %d: skipping datetime — UTC not session-synced", slot);
+        return;
+    }
+
     time_t  t;
     struct tm now;
     time(&t);
     gmtime_r(&t, &now);
-
-    /* Sanity: year must be post-2020 for the clock to be meaningful. */
-    if (now.tm_year < 120) {
-        ESP_LOGD(TAG, "slot %d: skipping datetime — clock not set yet", slot);
-        return;
-    }
 
     char path[80];
     snprintf(path, sizeof(path), RC_HTTP_PATH_DATETIME_FMT,

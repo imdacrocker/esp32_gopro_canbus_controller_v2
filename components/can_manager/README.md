@@ -8,9 +8,10 @@ Manages the TWAI (CAN) bus interface. Receives logging commands and GPS timestam
 
 - **0x600 logging command**: On every received frame, update `desired_recording` for all camera slots by calling `camera_manager_set_desired_recording_all()`. Fire the `on_logging_state` callback with `LOGGING_STATE_LOGGING` or `LOGGING_STATE_NOT_LOGGING`.
 - **5 s watchdog**: If no `0x600` frame arrives within 5 seconds, revert to `LOGGING_STATE_UNKNOWN` and call `camera_manager_set_desired_recording_all(DESIRED_RECORDING_UNKNOWN)` — suppressing mismatch correction until the bus recovers. The `on_logging_state` callback is **not** fired for the `UNKNOWN` transition.
-- **0x602 GPS UTC timestamp**: Parse the 64-bit little-endian Unix epoch (ms). Fire `on_utc_acquired` exactly once on the first valid frame (year > 2020). Subsequent frames update the stored epoch used for clock extrapolation.
+- **0x602 GPS UTC timestamp**: Parse the 64-bit little-endian Unix epoch (ms). Fire `on_utc_acquired` exactly once per boot session, on the first valid live source — either a GPS frame (year > 2020) or a successful `can_manager_set_manual_utc_ms()` call. Subsequent frames update the stored epoch used for clock extrapolation. Each live update also calls `settimeofday()` so libc time APIs in other components return useful values.
 - **0x601 camera status TX**: Transmit camera states for all 4 slots at 5 Hz via a periodic `esp_timer`. Slot values read from `camera_manager_get_slot_can_state()`.
 - **Timezone offset**: Persist a UTC-to-local hour offset in NVS, loaded at init, applied when setting camera date/time.
+- **UTC persistence across boots**: Save the current best estimate of UTC to NVS — immediately on first session sync, and every 5 minutes thereafter. On `can_manager_init()` the saved value is restored into the in-memory anchor and pushed to the system clock, but is **not** treated as a live sync (so camera `SetDateTime` is still deferred until a real GPS / web-UI sync occurs).
 
 ---
 
@@ -29,8 +30,8 @@ REQUIRES: camera_manager, esp_driver_twai, esp_timer, freertos, nvs_flash
 
 | File | Responsibility |
 |------|---------------|
-| `include/can_manager.h` | Public API: types, callback typedefs, init, state queries, timezone offset |
-| `can_manager.c` | TWAI node setup, ISR RX callback, RX task, TX timer, watchdog, NVS |
+| `include/can_manager.h` | Public API: types, callback typedefs, init, state queries, timezone offset, manual UTC entry |
+| `can_manager.c` | TWAI node setup, ISR RX callback, RX task, TX timer, watchdog, UTC anchor + system-clock sync, NVS persistence (tz offset + last UTC, periodic save) |
 
 ---
 
@@ -48,8 +49,19 @@ void can_manager_init(void);
 /* Current logging state — safe to call from any task */
 can_logging_state_t can_manager_get_logging_state(void);
 
-/* Estimated current UTC in ms; returns false until first valid 0x602 */
+/* Estimated current UTC in ms; returns false only when no anchor exists at all
+ * (no GPS, no manual set, and no NVS-restored value).  Anchor sources include
+ * the NVS-restored boot value, so this can return true before any live sync. */
 bool can_manager_get_utc_ms(uint64_t *out_ms);
+
+/* True only after a live source — GPS frame or manual web-UI set — has won
+ * this boot session.  Used by camera drivers to gate SetDateTime; an
+ * NVS-restored anchor never counts as session-synced. */
+bool can_manager_utc_is_session_synced(void);
+
+/* Manually set UTC from the web UI.  Returns ESP_ERR_INVALID_STATE if a live
+ * source has already won this session (NVS-restored values do not block). */
+esp_err_t can_manager_set_manual_utc_ms(uint64_t utc_ms);
 
 /* Timezone offset in NVS — clamped to IANA range [−12, +14] */
 void   can_manager_set_tz_offset(int8_t hours);
@@ -66,7 +78,9 @@ typedef void (*can_rx_frame_cb_t)(uint32_t id, const uint8_t *data,
 /* Every 0x600 frame; never called with LOGGING_STATE_UNKNOWN */
 typedef void (*can_logging_state_cb_t)(can_logging_state_t state, void *arg);
 
-/* Exactly once, on the first valid 0x602 frame */
+/* Exactly once per boot session, on the first live UTC source — either a
+ * valid 0x602 frame or a successful can_manager_set_manual_utc_ms() call.
+ * NVS-restored UTC at boot does NOT fire this callback. */
 typedef void (*can_utc_acquired_cb_t)(uint64_t utc_ms, void *arg);
 ```
 

@@ -13,7 +13,7 @@ Recording commands are **not** sent over BLE. Once COHN provisioning is complete
 - **GATT setup**: discover all characteristics across the full handle range, then subscribe CCCDs for all notify/indicate characteristics.
 - **Readiness poll**: send `GetHardwareInfo` (0x3C) after GATT setup; retry up to 10× at 3-second intervals. Extract `camera_model_t` from the response and hand it to `camera_manager`.
 - **COHN provisioning**: when the camera is ready and no COHN credentials exist in NVS, run the 4-step provisioning sequence over the network management channel (GP-0091/0092).
-- **UTC sync**: send `SetDateTime` to all connected cameras when a valid UTC timestamp becomes available; unblock any provisioning sequences that were waiting for it.
+- **UTC sync**: send `SetDateTime` to all connected cameras when UTC is live-synced this session; unblock any provisioning sequences that were waiting for it. `SetDateTime` is internally gated on `can_manager_utc_is_session_synced()`, so an NVS-restored UTC at boot does not push stale time to a camera.
 - **BLE keepalive**: send `0x42` to the settings channel (GP-0074) every 3 seconds to prevent camera auto-sleep.
 - **Re-provisioning**: expose `open_gopro_ble_reprovision()` for `open_gopro_http` to call after repeated HTTPS 401 responses.
 
@@ -22,7 +22,7 @@ Recording commands are **not** sent over BLE. Once COHN provisioning is complete
 ## Dependencies
 
 ```
-REQUIRES: bt, nvs_flash, esp_wifi, esp_timer, freertos, camera_manager, ble_core
+REQUIRES: bt, nvs_flash, esp_wifi, esp_timer, freertos, camera_manager, can_manager, ble_core
 ```
 
 **Precondition:** `camera_manager_init()` must be called before `open_gopro_ble_init()`.  
@@ -72,7 +72,11 @@ bool open_gopro_ble_get_cohn_credentials(int slot,
 /* Re-provisioning — called by open_gopro_http after repeated HTTPS 401 */
 void open_gopro_ble_reprovision(int slot);
 
-/* UTC sync — called by can_manager on GPS lock, or by the web UI */
+/* UTC sync — called by main.c on the first live UTC source this session
+ * (GPS frame or web-UI manual set).  Sends SetDateTime to every connected
+ * slot and unblocks any cohn_pending_utc.  No-op for individual slots when
+ * UTC is not session-synced (so an NVS-restored boot value cannot push
+ * stale time to a camera). */
 void open_gopro_ble_sync_time_all(void);
 ```
 
@@ -121,11 +125,14 @@ gatt discovery complete
 GetHardwareInfo (up to 10 retries × 3 s)
   success → extract model_num → camera_manager_set_model()
            → check NVS for cam_N/gopro_cohn
-             credentials present  → SetDateTime (best-effort)
+             credentials present  → SetDateTime (best-effort; internally
+                                                  skipped unless UTC is
+                                                  session-synced this boot)
                                   → camera_manager_on_ble_ready()
                                   → start keepalive timer
-             credentials absent   → UTC available?
-                                      yes → SetDateTime → gopro_cohn_provision()
+             credentials absent   → SetDateTime (same gating as above)
+                                  → any UTC anchor (incl. NVS-restored)?
+                                      yes → gopro_cohn_provision()
                                       no  → set cohn_pending_utc, start keepalive
   failure → retry; after 10 failures → ble_gap_terminate()
 

@@ -78,7 +78,7 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 | [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Discovery, pairing, COHN provisioning, BLE keepalive |
 | [`open_gopro_http`](components/gopro/open_gopro_http) | Open GoPro HTTPS/COHN driver (Hero 9+) |
 | [`gopro_wifi_rc`](components/gopro/gopro_wifi_rc/README.md) | RC-emulation driver over WiFi (Hero 4) |
-| [`can_manager`](components/can_manager/README.md) | TWAI node, 0x600/0x602 RX, 0x601 TX at 5 Hz, GPS UTC, timezone NVS |
+| [`can_manager`](components/can_manager/README.md) | TWAI node, 0x600/0x602 RX, 0x601 TX at 5 Hz, GPS UTC + cross-boot UTC persistence, manual UTC entry, timezone NVS |
 | [`http_server`](components/http_server) | esp_httpd instance, LittleFS web UI, all `/api/` endpoint handlers |
 
 ---
@@ -95,7 +95,7 @@ app_main()
  6. gopro_wifi_rc_init()                // register RC-emulation driver (Hero 4)
  7. open_gopro_ble_init()               // register BLE callbacks + purge bonds
  8. ble_core_init()                     // starts NimBLE host task; on_sync fires async
- 9. can_manager_register_callbacks(...) // wire GPS UTC → sync_time_all callbacks
+ 9. can_manager_register_callbacks(...) // wire on_utc_acquired → sync_time_all (BLE+RC)
 10. can_manager_init()                  // start TWAI node, RX task, TX timer, watchdog
 11. wifi_manager_set_callbacks(...)     // wire station-associated/DHCP/disconnected CBs
 12. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
@@ -195,7 +195,7 @@ The web UI is served from `http://10.71.79.1/`. All API endpoints return `applic
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/logging-state` | RaceCapture logging state (`logging` / `not_logging` / `unknown`) |
-| GET | `/api/utc` | GPS UTC timestamp with timezone offset applied |
+| GET | `/api/utc` | UTC timestamp (tz offset applied); response includes `valid` (any anchor, including NVS-restored) and `session_synced` (live source this boot only) |
 | GET | `/api/auto-control` | Whether cameras follow CAN logging state automatically |
 | POST | `/api/auto-control` | Set auto-control on/off |
 | GET | `/api/paired-cameras` | All configured camera slots with connection and recording status |
@@ -210,7 +210,7 @@ The web UI is served from `http://10.71.79.1/`. All API endpoints return `applic
 | POST | `/api/rc/add` | Register a SoftAP station as an RC-emulation (Hero 4) camera |
 | GET | `/api/settings/timezone` | Current UTC offset in whole hours |
 | POST | `/api/settings/timezone` | Set UTC offset (`−12` to `+14`) |
-| POST | `/api/settings/datetime` | Set system time manually (only when GPS not yet acquired) |
+| POST | `/api/settings/datetime` | Set system time manually (only when no live source has won this boot session — NVS-restored boot value does not block manual entry) |
 | POST | `/api/reboot` | Restart the ESP32 |
 | POST | `/api/factory-reset` | Erase NVS and restart |
 
