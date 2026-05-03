@@ -23,6 +23,14 @@ extern volatile bool s_discovering;
 void start_scan_if_needed(void);
 
 /*
+ * Initialise the deferred-rescan callout used when ble_gap_connect() returns
+ * BLE_HS_EDONE (controller still holds stale connection state). Call once
+ * from ble_core_init() after nimble_port_init().
+ * Defined in ble_scan.c.
+ */
+void ble_core_scan_init(void);
+
+/*
  * GAP event handler for all connection-lifecycle events.
  * Defined in ble_connect.c, registered as the callback for ble_gap_connect().
  */

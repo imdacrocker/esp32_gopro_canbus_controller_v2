@@ -24,6 +24,7 @@ static inline bool gopro_model_is_gopro(camera_model_t model)
 {
     return model == CAMERA_MODEL_GOPRO_HERO4_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO4_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO7_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO9_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO10_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO11_BLACK
@@ -44,7 +45,8 @@ static inline bool gopro_model_uses_rc_emulation(camera_model_t model)
 /** Camera is controlled over BLE (no WiFi association required). */
 static inline bool gopro_model_uses_ble_control(camera_model_t model)
 {
-    return model == CAMERA_MODEL_GOPRO_HERO9_BLACK
+    return model == CAMERA_MODEL_GOPRO_HERO7_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO9_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO10_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO11_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO11_MINI

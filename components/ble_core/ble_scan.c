@@ -1,6 +1,7 @@
 #include "ble_core_internal.h"
 
 #include "nimble/nimble_port.h"
+#include "nimble/nimble_npl.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "esp_log.h"
@@ -11,6 +12,39 @@ static const char *TAG = "ble_core";
 
 volatile bool s_connecting  = false;
 volatile bool s_discovering = false;
+
+/*
+ * Deferred-rescan cooldown.
+ *
+ * After a supervisor-timeout disconnect the host fires DISCONNECT immediately
+ * but the controller's connection table can take longer to drop the peer. If
+ * the scanner reports a (cached/stale) advertisement during that window,
+ * ble_gap_connect() returns BLE_HS_EDONE ("already connected"). Restarting
+ * the scan inline causes a tight loop of EDONE failures at the controller's
+ * advertising-report rate. Defer the rescan instead; by the time the callout
+ * fires, the controller has fully torn the connection down.
+ */
+#define EDONE_RESCAN_DELAY_MS 3000
+
+static struct ble_npl_callout s_rescan_co;
+
+static void rescan_co_cb(struct ble_npl_event *ev)
+{
+    ESP_LOGI(TAG, "deferred rescan: resuming background scan");
+    start_scan_if_needed();
+}
+
+void ble_core_scan_init(void)
+{
+    ble_npl_callout_init(&s_rescan_co, nimble_port_get_dflt_eventq(),
+                         rescan_co_cb, NULL);
+}
+
+static void defer_rescan(void)
+{
+    ble_npl_callout_reset(&s_rescan_co,
+                          ble_npl_time_ms_to_ticks32(EDONE_RESCAN_DELAY_MS));
+}
 
 /* ---------------------------------------------------------------------------
  * scan_event_cb
@@ -55,7 +89,11 @@ static int scan_event_cb(struct ble_gap_event *event, void *arg)
                 if (rc != 0) {
                     ESP_LOGE(TAG, "connect failed: rc=%d", rc);
                     s_connecting = false;
-                    start_scan_if_needed();
+                    if (rc == BLE_HS_EDONE) {
+                        defer_rescan();
+                    } else {
+                        start_scan_if_needed();
+                    }
                 }
             }
         }
@@ -226,7 +264,11 @@ static void do_connect(struct ble_npl_event *ev)
     if (rc != 0) {
         ESP_LOGE(TAG, "connect_by_addr failed: rc=%d", rc);
         s_connecting = false;
-        start_scan_if_needed();
+        if (rc == BLE_HS_EDONE) {
+            defer_rescan();
+        } else {
+            start_scan_if_needed();
+        }
     }
 }
 

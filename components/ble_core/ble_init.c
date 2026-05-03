@@ -36,6 +36,7 @@ void ble_core_register_callbacks(const ble_core_callbacks_t *cbs)
 void ble_core_init(void)
 {
     nimble_port_init();
+    ble_core_scan_init();
 
     ble_hs_cfg.sync_cb  = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
