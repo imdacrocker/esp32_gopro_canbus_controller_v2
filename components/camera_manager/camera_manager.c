@@ -33,8 +33,6 @@ typedef struct {
     uint8_t        mac[6];
     uint32_t       last_ip;
     bool           is_configured;
-    uint8_t        wifi_mac[6];   /* zero on legacy records and for slots
-                                     that have never reached COHN provisioning */
 } camera_nv_record_t;
 
 /* Internal per-slot state */
@@ -42,11 +40,10 @@ typedef struct {
     /* Persisted (mirrored from NVS on load) */
     char              name[32];
     camera_model_t    model;
-    uint8_t           mac[6];          /* BLE peer MAC — used by find_by_mac */
+    uint8_t           mac[6];          /* BLE peer MAC for BLE-control cameras;
+                                          WiFi MAC for RC-emulation cameras */
     uint32_t          last_ip;
     bool              is_configured;
-    uint8_t           wifi_mac[6];     /* WiFi-side MAC, learned from COHN
-                                          status; matched in find_by_mac too */
 
     /* BLE (§7.2) */
     cam_ble_status_t  ble_status;
@@ -56,10 +53,8 @@ typedef struct {
     wifi_cam_status_t wifi_status;
     uint32_t          ip_addr;
     bool              wifi_associated;  /* true between SoftAP station join
-                                           and disassociation events; gates
-                                           set_camera_ready's immediate
-                                           dispatch so we don't probe a
-                                           camera that isn't on the AP yet */
+                                           and disassociation events; RC
+                                           cameras only */
 
     /* Control */
     desired_recording_t    desired_recording;
@@ -190,19 +185,10 @@ esp_err_t camera_manager_register_driver(const camera_driver_t *driver,
 
 int camera_manager_find_by_mac(const uint8_t mac[6])
 {
-    static const uint8_t zero_mac[6] = {0};
     lock();
     for (int i = 0; i < s_slot_count; i++) {
         if (!s_slots[i].is_configured) continue;
         if (memcmp(s_slots[i].mac, mac, 6) == 0) {
-            unlock();
-            return i;
-        }
-        /* GoPro cameras have separate BLE and WiFi radios with different
-         * MACs.  Slots are registered with the BLE peer MAC; the WiFi MAC
-         * is learned later from the COHN status response.  Match either. */
-        if (memcmp(s_slots[i].wifi_mac, zero_mac, 6) != 0 &&
-            memcmp(s_slots[i].wifi_mac, mac, 6) == 0) {
             unlock();
             return i;
         }
@@ -313,103 +299,21 @@ void camera_manager_set_name(int slot, const char *name)
     unlock();
 }
 
-void camera_manager_set_camera_ready(int slot, bool ready)
-{
-    if (!slot_valid(slot)) return;
-
-    /*
-     * The camera's DHCP IP assignment can arrive before COHN provisioning
-     * finishes (especially the first time, when CreateCert + status poll
-     * take several seconds).  In that case on_station_ip ran while
-     * wifi_status was still NONE and didn't trigger the driver's probe.
-     * If we're transitioning to CONNECTED and last_ip is already populated
-     * AND the camera is currently on our SoftAP, dispatch on_wifi_associated
-     * now so the driver can probe.  If the camera is not currently
-     * associated (e.g. cached-credentials reboot path where BLE-ready fires
-     * before the camera rejoins WiFi), we leave the state as CONNECTED and
-     * let the next on_station_ip event do the dispatch.
-     */
-    const camera_driver_t *drv     = NULL;
-    void                  *drv_ctx = NULL;
-    uint32_t               ip      = 0;
-
-    lock();
-    s_slots[slot].wifi_status = ready ? WIFI_CAM_CONNECTED : WIFI_CAM_NONE;
-    if (ready &&
-        s_slots[slot].last_ip != 0 &&
-        s_slots[slot].wifi_associated &&
-        s_slots[slot].driver) {
-        drv     = s_slots[slot].driver;
-        drv_ctx = s_slots[slot].driver_ctx;
-        ip      = s_slots[slot].last_ip;
-    }
-    unlock();
-
-    ESP_LOGI(TAG, "slot %d: wifi_status → %s", slot,
-             ready ? "CONNECTED (probe pending)" : "NONE");
-
-    if (drv && drv->on_wifi_associated) {
-        drv->on_wifi_associated(drv_ctx, ip);
-    }
-}
-
-void camera_manager_on_cohn_provisioned(int slot,
-                                         const uint8_t wifi_mac[6],
-                                         uint32_t ip)
-{
-    if (!slot_valid(slot) || wifi_mac == NULL) return;
-
-    const camera_driver_t *drv     = NULL;
-    void                  *drv_ctx = NULL;
-
-    lock();
-    camera_slot_t *sl = &s_slots[slot];
-    memcpy(sl->wifi_mac, wifi_mac, 6);
-    sl->last_ip      = ip;
-    sl->ip_addr      = ip;
-    sl->wifi_status  = WIFI_CAM_CONNECTED;
-    if (sl->driver) {
-        drv     = sl->driver;
-        drv_ctx = sl->driver_ctx;
-    }
-    /* Persist wifi_mac so subsequent on_station_ip events (or a reboot)
-     * can match the slot via the WiFi MAC alone. */
-    esp_err_t nv_err = save_slot_to_nvs(slot);
-    unlock();
-
-    if (nv_err != ESP_OK) {
-        ESP_LOGW(TAG, "slot %d: NVS save after COHN provision failed: %s",
-                 slot, esp_err_to_name(nv_err));
-    }
-
-    ESP_LOGI(TAG, "slot %d: wifi_status → CONNECTED (probe pending)  "
-                  "wifi_mac=%02x:%02x:%02x:%02x:%02x:%02x  ip=" IPSTR,
-             slot,
-             wifi_mac[0], wifi_mac[1], wifi_mac[2],
-             wifi_mac[3], wifi_mac[4], wifi_mac[5],
-             IP2STR((const esp_ip4_addr_t *)&ip));
-
-    if (drv && drv->on_wifi_associated) {
-        drv->on_wifi_associated(drv_ctx, ip);
-    }
-}
-
 /* ================================================================
- * WiFi state
+ * Camera-ready transition
  * ================================================================ */
 
-void camera_manager_on_wifi_connected(int slot, uint32_t ip)
+void camera_manager_on_camera_ready(int slot)
 {
     if (!slot_valid(slot)) return;
     lock();
     s_slots[slot].wifi_status = WIFI_CAM_READY;
-    s_slots[slot].ip_addr     = ip;
     unlock();
 
     /* Start mismatch poll timer — must not hold mutex while creating timer */
     start_poll_timer(slot);
 
-    ESP_LOGI(TAG, "slot %d: wifi ready (ip=%lu)", slot, (unsigned long)ip);
+    ESP_LOGI(TAG, "slot %d: camera ready", slot);
 }
 
 void camera_manager_on_wifi_disconnected(int slot)
@@ -442,19 +346,9 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip)
     lock();
     s_slots[slot].last_ip         = ip;
     s_slots[slot].wifi_associated = true;  /* DHCP implies association */
-    const camera_driver_t *drv     = NULL;
-    void                  *drv_ctx = NULL;
-    if (s_slots[slot].wifi_status == WIFI_CAM_CONNECTED && s_slots[slot].driver) {
-        drv     = s_slots[slot].driver;
-        drv_ctx = s_slots[slot].driver_ctx;
-    }
     unlock();
 
     ESP_LOGD(TAG, "slot %d: last_ip updated", slot);
-
-    if (drv && drv->on_wifi_associated) {
-        drv->on_wifi_associated(drv_ctx, ip);
-    }
 }
 
 void camera_manager_on_station_associated(const uint8_t mac[6])
@@ -465,9 +359,6 @@ void camera_manager_on_station_associated(const uint8_t mac[6])
     s_slots[slot].wifi_associated = true;
     unlock();
     ESP_LOGD(TAG, "slot %d: station associated", slot);
-    /* No driver dispatch here — wait for on_station_ip to deliver a fresh
-     * IP.  If set_camera_ready already ran and last_ip is current, the
-     * upcoming DHCP event will dispatch via on_station_ip. */
 }
 
 void camera_manager_on_station_disassociated(const uint8_t mac[6])
@@ -494,9 +385,6 @@ static esp_err_t load_slot_from_nvs(int slot)
     if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_ERR_NVS_NOT_FOUND;
     if (err != ESP_OK) return err;
 
-    /* Zero-init so legacy records (which lacked wifi_mac) load with a
-     * zeroed wifi_mac field — the new field at the end of the struct
-     * stays at its default. */
     camera_nv_record_t rec;
     memset(&rec, 0, sizeof(rec));
     size_t sz = sizeof(rec);
@@ -515,7 +403,6 @@ static esp_err_t load_slot_from_nvs(int slot)
     sl->name[sizeof(sl->name) - 1] = '\0';
     sl->model         = rec.model;
     memcpy(sl->mac, rec.mac, 6);
-    memcpy(sl->wifi_mac, rec.wifi_mac, 6);
     sl->last_ip       = rec.last_ip;
     sl->is_configured = rec.is_configured;
     sl->ble_handle    = BLE_HS_CONN_HANDLE_NONE;
@@ -542,7 +429,6 @@ static esp_err_t save_slot_to_nvs(int slot)
     };
     strncpy(rec.name, sl->name, sizeof(rec.name) - 1);
     memcpy(rec.mac, sl->mac, 6);
-    memcpy(rec.wifi_mac, sl->wifi_mac, 6);
 
     err = nvs_set_blob(h, NVS_KEY_CAMERA, &rec, sizeof(rec));
     if (err == ESP_OK) err = nvs_commit(h);
@@ -734,13 +620,6 @@ esp_err_t camera_manager_remove_slot(int slot)
  * Slot reordering (§20.6)
  * ================================================================ */
 
-/*
- * NVS key used by open_gopro_ble to store COHN credentials.
- * camera_manager copies this blob when reordering slots so credentials
- * follow their camera to the new index.
- */
-#define NVS_KEY_GOPRO_COHN  "gopro_cohn"
-
 esp_err_t camera_manager_reorder_slots(const int *new_order, int count)
 {
     if (!new_order || count <= 0 || count > CAMERA_MAX_SLOTS) {
@@ -785,37 +664,6 @@ esp_err_t camera_manager_reorder_slots(const int *new_order, int count)
     }
     unlock();
 
-    /*
-     * Read all gopro_cohn blobs from their ORIGINAL positions BEFORE any NVS
-     * erasure — if we erased first, overlapping permutations would destroy
-     * source data before we had a chance to copy it.
-     */
-    uint8_t *cohn_blobs[CAMERA_MAX_SLOTS] = {0};
-    size_t   cohn_sizes[CAMERA_MAX_SLOTS] = {0};
-
-    for (int i = 0; i < count; i++) {
-        int src = new_order[i];
-        if (src == i) continue;   /* no-op slot — skip */
-        char ns[16];
-        nvs_namespace(src, ns, sizeof(ns));
-        nvs_handle_t h;
-        if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) continue;
-        size_t sz = 0;
-        if (nvs_get_blob(h, NVS_KEY_GOPRO_COHN, NULL, &sz) == ESP_OK && sz > 0) {
-            cohn_blobs[i] = malloc(sz);
-            if (cohn_blobs[i]) {
-                if (nvs_get_blob(h, NVS_KEY_GOPRO_COHN,
-                                 cohn_blobs[i], &sz) == ESP_OK) {
-                    cohn_sizes[i] = sz;
-                } else {
-                    free(cohn_blobs[i]);
-                    cohn_blobs[i] = NULL;
-                }
-            }
-        }
-        nvs_close(h);
-    }
-
     /* Rewrite camera records at their new indices. */
     for (int i = 0; i < count; i++) {
         char ns[16];
@@ -827,20 +675,6 @@ esp_err_t camera_manager_reorder_slots(const int *new_order, int count)
             nvs_close(h);
         }
         save_slot_to_nvs(i);
-    }
-
-    /* Write the pre-read gopro_cohn blobs to their new destination indices. */
-    for (int i = 0; i < count; i++) {
-        if (!cohn_blobs[i]) continue;
-        char ns[16];
-        nvs_namespace(i, ns, sizeof(ns));
-        nvs_handle_t h;
-        if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
-            nvs_set_blob(h, NVS_KEY_GOPRO_COHN, cohn_blobs[i], cohn_sizes[i]);
-            nvs_commit(h);
-            nvs_close(h);
-        }
-        free(cohn_blobs[i]);
     }
 
     ESP_LOGI(TAG, "slots reordered (%d entries)", count);

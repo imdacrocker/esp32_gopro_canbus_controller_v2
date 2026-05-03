@@ -7,7 +7,6 @@
 #include "ble_core.h"
 #include "camera_manager.h"
 #include "open_gopro_ble.h"
-#include "open_gopro_http.h"
 #include "gopro_wifi_rc.h"
 #include "can_manager.h"
 #include "http_server.h"
@@ -27,8 +26,6 @@ static void on_gps_utc_acquired(uint64_t utc_ms, void *arg)
 
 static void on_station_associated(const uint8_t mac[6])
 {
-    /* Track association state so set_camera_ready can defer probe dispatch
-     * when the camera isn't currently on the AP. */
     camera_manager_on_station_associated(mac);
     gopro_wifi_rc_on_station_associated(mac);
 }
@@ -36,9 +33,9 @@ static void on_station_associated(const uint8_t mac[6])
 static void on_station_disconnected(const uint8_t mac[6])
 {
     camera_manager_on_station_disassociated(mac);
-    gopro_wifi_rc_on_station_disassociated(mac);           /* RC-emulation path */
-    open_gopro_http_on_camera_disconnected_by_mac(mac);    /* COHN path         */
-    /* Each handler applies its own model-type guard — only the owning driver acts. */
+    gopro_wifi_rc_on_station_disassociated(mac);   /* RC-emulation path */
+    /* BLE-control cameras never associate to the SoftAP, so no driver
+     * notification is needed beyond the manager bookkeeping. */
 }
 
 static void on_station_ip_assigned(const uint8_t mac[6], uint32_t ip)
@@ -66,12 +63,11 @@ void app_main(void)
 
     camera_manager_init();
 
-    open_gopro_http_init();
-
     /* Registers RC-emulation driver, starts work/shutter/UDP tasks. */
     gopro_wifi_rc_init();
 
-    /* Registers BLE callbacks with ble_core and purges stale bonds.
+    /* Registers BLE callbacks with ble_core, registers BLE-control driver
+     * with camera_manager, and purges stale bonds.
      * Must be called before ble_core_init(). */
     open_gopro_ble_init();
 
@@ -90,7 +86,7 @@ void app_main(void)
     can_manager_register_callbacks(&can_cbs);
     can_manager_init();
 
-    /* Wire WiFi station events to both RC-emulation and COHN drivers (§21.3).
+    /* Wire WiFi station events to the RC-emulation driver and camera_manager.
      * Must be called before wifi_manager_init() so no events are lost. */
     wifi_manager_set_callbacks(on_station_associated,
                                on_station_disconnected,

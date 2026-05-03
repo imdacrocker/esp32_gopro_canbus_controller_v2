@@ -154,7 +154,7 @@ void rc_handle_station_disconnected(const uint8_t mac[6])
 /*
  * Try GET /gp/gpControl/status up to RC_PROBE_RETRIES times.
  * On success: update camera name, mark wifi_ready, call
- * camera_manager_on_wifi_connected(), send date/time best-effort.
+ * camera_manager_on_camera_ready(), send date/time best-effort.
  * On failure: log and return; next on_station_dhcp will retry.
  */
 void rc_handle_probe(int slot)
@@ -201,7 +201,7 @@ void rc_handle_probe(int slot)
     }
 
     ctx->wifi_ready = true;
-    camera_manager_on_wifi_connected(slot, ctx->last_ip);
+    camera_manager_on_camera_ready(slot);
     ESP_LOGI(TAG, "slot %d: probe OK — wifi ready", slot);
 
     /* Date/time — best-effort; only if system clock has been set by can_manager. */

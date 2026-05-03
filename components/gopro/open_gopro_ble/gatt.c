@@ -48,18 +48,12 @@ typedef struct {
 #define HANDLE_OFF(field)  ((uint16_t)offsetof(gopro_gatt_handles_t, field))
 
 static const chr_map_entry_t k_chr_map[] = {
-    { GOPRO_CHR_CMD_WRITE_UUID,       HANDLE_OFF(cmd_write)             },
-    { GOPRO_CHR_CMD_RESP_NOTIFY_UUID, HANDLE_OFF(cmd_resp_notify)       },
-    { GOPRO_CHR_SETTINGS_WRITE_UUID,  HANDLE_OFF(settings_write)        },
-    { GOPRO_CHR_SETTINGS_RESP_UUID,   HANDLE_OFF(settings_resp_notify)  },
-    { GOPRO_CHR_QUERY_WRITE_UUID,     HANDLE_OFF(query_write)           },
-    { GOPRO_CHR_QUERY_RESP_NOTIFY_UUID, HANDLE_OFF(query_resp_notify)   },
-    { GOPRO_CHR_NET_MGMT_CMD_UUID,    HANDLE_OFF(net_mgmt_cmd_write)    },
-    { GOPRO_CHR_NET_MGMT_RESP_UUID,   HANDLE_OFF(net_mgmt_resp_notify)  },
-    { GOPRO_CHR_WIFI_AP_PWR_UUID,     HANDLE_OFF(wifi_ap_pwr_write)     },
-    { GOPRO_CHR_WIFI_AP_SSID_UUID,    HANDLE_OFF(wifi_ap_ssid_read)     },
-    { GOPRO_CHR_WIFI_AP_PASS_UUID,    HANDLE_OFF(wifi_ap_pass_read)     },
-    { GOPRO_CHR_WIFI_AP_STATE_UUID,   HANDLE_OFF(wifi_ap_state_indicate)},
+    { GOPRO_CHR_CMD_WRITE_UUID,         HANDLE_OFF(cmd_write)            },
+    { GOPRO_CHR_CMD_RESP_NOTIFY_UUID,   HANDLE_OFF(cmd_resp_notify)      },
+    { GOPRO_CHR_SETTINGS_WRITE_UUID,    HANDLE_OFF(settings_write)       },
+    { GOPRO_CHR_SETTINGS_RESP_UUID,     HANDLE_OFF(settings_resp_notify) },
+    { GOPRO_CHR_QUERY_WRITE_UUID,       HANDLE_OFF(query_write)          },
+    { GOPRO_CHR_QUERY_RESP_NOTIFY_UUID, HANDLE_OFF(query_resp_notify)    },
 };
 #define CHR_MAP_LEN  (sizeof(k_chr_map) / sizeof(k_chr_map[0]))
 

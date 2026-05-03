@@ -1,13 +1,16 @@
 /*
- * readiness.c — GetHardwareInfo poll and camera model extraction.
+ * readiness.c — Post-GATT connection sequence (V1-style).
  *
- * After GATT setup is complete, we repeatedly send GetHardwareInfo (0x3C) to
- * verify the camera's GoPro stack is up and to read the model number.
- * On success, gopro_on_camera_ready() branches into provisioning or ready state.
- * On failure after GOPRO_READINESS_RETRY_MAX attempts the connection is dropped.
+ *   1. GetHardwareInfo poll until status=0  (up to GOPRO_READINESS_RETRY_MAX)
+ *   2. SetCameraControlStatus(EXTERNAL)     (ResponseGeneric or 3 s timeout)
+ *   3. camera_manager_on_camera_ready()     → wifi_status = WIFI_CAM_READY
+ *   4. SetDateTime (best-effort, deferred if UTC not session-synced)
+ *   5. Start the 5 s GetStatusValue poll
  *
- * All code runs on the NimBLE host task except the esp_timer callback, which
- * is rescheduled on the timer task and posts work back via ble_core_gatt_write().
+ * The connection sequence proceeds even if SetCameraControlStatus times out —
+ * a silent camera should not permanently stall setup.
+ *
+ * All callbacks run on the NimBLE host task or the esp_timer task.
  */
 
 #include <stdio.h>
@@ -24,22 +27,6 @@ static const char *TAG = "gopro_ble/ready";
 static const uint8_t k_get_hwinfo_pkt[2] = { 0x01u, GOPRO_CMD_GET_HARDWARE_INFO };
 
 /* ---- GetHardwareInfo response payload parser ----------------------------- */
-
-/*
- * The GetHardwareInfo response body is a sequence of positional length-value
- * fields (NOT type-length-value).  Each field is [len (1B), value (len B)],
- * and fields appear in a fixed order:
- *
- *   1) model number   (uint32_t, big-endian)
- *   2) model name     (string)
- *   3) deprecated     (string, ignored)
- *   4) firmware       (string)
- *   5) serial number  (string)
- *   6) AP SSID        (string)
- *   7) AP MAC address (6 raw bytes)
- *
- * Spec: https://gopro.github.io/OpenGoPro/ble/features/query.html#get-hardware-info
- */
 
 /* Consume one LV string field; returns bytes consumed or 0 on error. */
 static int lv_take_string(const uint8_t *data, uint16_t remaining,
@@ -76,10 +63,6 @@ static int lv_take_uint(const uint8_t *data, uint16_t remaining, uint32_t *out)
     return 1 + flen;
 }
 
-/*
- * Parse the GetHardwareInfo response body, log the human-readable fields,
- * and return the model number (0 if it could not be parsed).
- */
 static uint32_t parse_and_log_hw_info(int slot, const uint8_t *body, uint16_t len)
 {
     char     model_name[32] = {0};
@@ -115,7 +98,6 @@ static uint32_t parse_and_log_hw_info(int slot, const uint8_t *body, uint16_t le
     if (n == 0) goto out;
     i += (uint16_t)n;
 
-    /* AP MAC: 1-byte length followed by raw bytes — format as XX:XX:... */
     char ap_mac[24] = {0};
     if (i < len) {
         uint8_t mlen = body[i++];
@@ -133,69 +115,128 @@ out:
     return model_num;
 }
 
-/* ---- gopro_on_camera_ready (§15.5) --------------------------------------- */
+/* ---- Stage 3: camera fully ready ----------------------------------------- */
 
-void gopro_on_camera_ready(gopro_ble_ctx_t *ctx, uint32_t model_num)
+static void complete_connection_sequence(gopro_ble_ctx_t *ctx)
 {
-    camera_model_t model = (camera_model_t)model_num;
-    ESP_LOGI(TAG, "slot %d: camera ready model=%u", ctx->slot, model_num);
+    int slot = ctx->slot;
+    ESP_LOGI(TAG, "slot %d: camera ready — completing connection sequence", slot);
 
-    camera_manager_set_model(ctx->slot, model);
+    camera_manager_on_camera_ready(slot);
 
-    esp_err_t save_err = camera_manager_save_slot(ctx->slot);
-    if (save_err != ESP_OK) {
-        ESP_LOGW(TAG, "slot %d: NVS save after pairing failed: %s",
-                 ctx->slot, esp_err_to_name(save_err));
-    }
+    /* Date/time best-effort — gopro_control_set_datetime() returns silently
+     * when UTC is not session-synced.  If deferred, the flag will trigger a
+     * resend from open_gopro_ble_sync_time_all() once UTC arrives. */
+    uint64_t utc_ms;
+    bool utc_ok = can_manager_utc_is_session_synced();
+    (void)can_manager_get_utc_ms(&utc_ms);
 
-    /* Check NVS for existing COHN credentials. */
-    char user[32];
-    char pass[64];
-    extern bool gopro_cohn_load(int slot, char *user, size_t ulen,
-                                char *pass, size_t plen);
-    bool have_creds = gopro_cohn_load(ctx->slot, user, sizeof(user),
-                                      pass, sizeof(pass));
-
-    if (have_creds) {
-        ESP_LOGI(TAG, "slot %d: COHN credentials present — camera ready", ctx->slot);
-        /* Send datetime on best-effort basis if UTC is available. */
+    if (utc_ok) {
         gopro_control_set_datetime(ctx);
-        camera_manager_on_ble_ready(ctx->slot);
-        /* Cached-credential path: transition wifi_status → CONNECTED so
-         * on_station_ip can dispatch the HTTP probe (or, if last_ip is
-         * already populated from an earlier DHCP event during this boot,
-         * dispatch the probe now).  Without this, the COHN driver never
-         * starts after a reboot. */
-        camera_manager_set_camera_ready(ctx->slot, true);
-        gopro_keepalive_start(ctx);
     } else {
-        /* Need to provision COHN. */
-        gopro_control_set_datetime(ctx);
-        /* Need a UTC anchor for COHN cert generation.  An NVS-restored value
-         * is good enough here (cert validity windows are months).  Live sync
-         * is only required for pushing time to the camera, gated separately
-         * inside gopro_control_set_datetime(). */
-        uint64_t utc_ms;
-        bool utc_ok = can_manager_get_utc_ms(&utc_ms);
-
-        if (utc_ok) {
-            gopro_keepalive_start(ctx);
-            gopro_cohn_provision(ctx);
-        } else {
-            ESP_LOGI(TAG, "slot %d: UTC not available, deferring COHN provision",
-                     ctx->slot);
-            ctx->cohn_pending_utc = true;
-            gopro_keepalive_start(ctx);
-        }
+        ESP_LOGI(TAG, "slot %d: SetDateTime deferred — UTC not session-synced",
+                 slot);
+        ctx->datetime_pending_utc = true;
     }
+
+    gopro_status_poll_start(ctx);
 }
 
-/* ---- Dispatch from query.c ----------------------------------------------- */
+/* ---- Stage 2: SetCameraControlStatus(EXTERNAL) handshake ----------------- */
 
-/*
- * Called by query.c when a complete GetHardwareInfo response arrives on
- * cmd_resp_notify (GP-0073).
- */
+static void cam_ctrl_timeout_cb(void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+
+    if (!ctx->cam_ctrl_pending || ctx->conn_handle == GOPRO_CONN_NONE) {
+        return;
+    }
+    ESP_LOGW(TAG, "slot %d: SetCameraControlStatus timed out — proceeding anyway",
+             ctx->slot);
+    ctx->cam_ctrl_pending = false;
+    complete_connection_sequence(ctx);
+}
+
+void gopro_readiness_handle_cam_ctrl_acked(gopro_ble_ctx_t *ctx, uint8_t result)
+{
+    if (!ctx->cam_ctrl_pending) {
+        return;
+    }
+
+    if (ctx->cam_ctrl_timer) {
+        esp_timer_stop(ctx->cam_ctrl_timer);
+    }
+    ctx->cam_ctrl_pending = false;
+
+    if (result == GOPRO_RESP_GENERIC_SUCCESS) {
+        ESP_LOGI(TAG, "slot %d: SetCameraControlStatus → CAMERA_EXTERNAL_CONTROL",
+                 ctx->slot);
+    } else {
+        ESP_LOGW(TAG, "slot %d: SetCameraControlStatus rejected (result=%u) — proceeding",
+                 ctx->slot, result);
+    }
+
+    complete_connection_sequence(ctx);
+}
+
+static void send_set_cam_ctrl(gopro_ble_ctx_t *ctx)
+{
+    /* Lazy timer creation. */
+    if (ctx->cam_ctrl_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback        = cam_ctrl_timeout_cb,
+            .arg             = ctx,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name            = "gopro_cam_ctrl",
+        };
+        if (esp_timer_create(&args, &ctx->cam_ctrl_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "slot %d: cam_ctrl timer create failed — skipping handshake",
+                     ctx->slot);
+            complete_connection_sequence(ctx);
+            return;
+        }
+    }
+
+    ctx->cam_ctrl_pending = true;
+    int rc = gopro_control_send_set_cam_ctrl(ctx);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "slot %d: SetCameraControlStatus send failed — skipping handshake",
+                 ctx->slot);
+        ctx->cam_ctrl_pending = false;
+        complete_connection_sequence(ctx);
+        return;
+    }
+    esp_timer_start_once(ctx->cam_ctrl_timer,
+                         (uint64_t)GOPRO_CAM_CTRL_TIMEOUT_MS * 1000ULL);
+}
+
+/* ---- Stage 1: GetHardwareInfo readiness poll ----------------------------- */
+
+static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
+{
+    int slot = ctx->slot;
+    camera_model_t model = (camera_model_t)model_num;
+    ESP_LOGI(TAG, "slot %d: hardware ready, model=%u", slot, (unsigned)model_num);
+
+    camera_manager_set_model(slot, model);
+    esp_err_t save_err = camera_manager_save_slot(slot);
+    if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "slot %d: NVS save after pairing failed: %s",
+                 slot, esp_err_to_name(save_err));
+    }
+
+    camera_manager_on_ble_ready(slot);
+
+    /* Keepalive must run as long as we hold the BLE connection — start it
+     * before the SetCameraControlStatus handshake. */
+    gopro_keepalive_start(ctx);
+
+    send_set_cam_ctrl(ctx);
+}
+
+void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
+                                  const uint8_t *data, uint16_t len);
+
 void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
                                   const uint8_t *data, uint16_t len)
 {
@@ -216,16 +257,17 @@ void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
 
     /* Success — stop poll timer before any further work. */
     ctx->readiness_polling = false;
-    esp_timer_stop(ctx->readiness_timer);
+    if (ctx->readiness_timer) {
+        esp_timer_stop(ctx->readiness_timer);
+    }
 
-    /* Parse and log the LV body that follows the [cmd_id][status] header. */
     uint32_t model_num = parse_and_log_hw_info(ctx->slot,
                                                 data + GOPRO_RESP_HDR_LEN,
                                                 len - GOPRO_RESP_HDR_LEN);
-    gopro_on_camera_ready(ctx, model_num);
+    gopro_on_hw_info_ok(ctx, model_num);
 }
 
-/* ---- Timer callback ------------------------------------------------------ */
+/* ---- Readiness retry timer ----------------------------------------------- */
 
 static void on_readiness_timer(void *arg)
 {
@@ -285,5 +327,11 @@ void gopro_readiness_cancel(gopro_ble_ctx_t *ctx)
         esp_timer_stop(ctx->readiness_timer);
         esp_timer_delete(ctx->readiness_timer);
         ctx->readiness_timer = NULL;
+    }
+    ctx->cam_ctrl_pending = false;
+    if (ctx->cam_ctrl_timer) {
+        esp_timer_stop(ctx->cam_ctrl_timer);
+        esp_timer_delete(ctx->cam_ctrl_timer);
+        ctx->cam_ctrl_timer = NULL;
     }
 }

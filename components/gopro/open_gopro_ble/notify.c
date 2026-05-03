@@ -33,8 +33,6 @@ void gopro_notify_rx(uint16_t conn_handle, uint16_t attr_handle,
         chan = GOPRO_CHAN_SETTINGS;  chan_name = "settings";
     } else if (attr_handle == g->query_resp_notify) {
         chan = GOPRO_CHAN_QUERY;     chan_name = "query";
-    } else if (attr_handle == g->net_mgmt_resp_notify) {
-        chan = GOPRO_CHAN_NET_MGMT;  chan_name = "net_mgmt";
     } else {
         ESP_LOGW(TAG, "slot %d: notify on unregistered handle 0x%04x len=%d",
                  ctx->slot, attr_handle, len);

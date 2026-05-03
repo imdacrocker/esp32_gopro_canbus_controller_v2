@@ -5,7 +5,7 @@ idf_component_register(
         "gatt.c"
         "readiness.c"
         "control.c"
-        "cohn.c"
+        "status.c"
         "query.c"
         "notify.c"
     INCLUDE_DIRS
@@ -17,7 +17,6 @@ idf_component_register(
         bt
         nvs_flash
         esp_timer
-        esp_wifi
         freertos
         camera_manager
         can_manager

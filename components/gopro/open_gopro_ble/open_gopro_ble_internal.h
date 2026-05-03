@@ -24,12 +24,6 @@ typedef struct {
     uint16_t settings_resp_notify;
     uint16_t query_write;
     uint16_t query_resp_notify;
-    uint16_t net_mgmt_cmd_write;
-    uint16_t net_mgmt_resp_notify;
-    uint16_t wifi_ap_pwr_write;
-    uint16_t wifi_ap_ssid_read;
-    uint16_t wifi_ap_pass_read;
-    uint16_t wifi_ap_state_indicate;
 } gopro_gatt_handles_t;
 
 /* ---- Per-slot driver context (§15.4) ------------------------------------- */
@@ -40,17 +34,31 @@ typedef struct {
     gopro_gatt_handles_t gatt;
     uint16_t             negotiated_mtu;
 
-    /* Readiness poll state */
+    /* Readiness poll (GetHardwareInfo until status=0) */
     bool               readiness_polling;
     uint8_t            readiness_retry_count;
     esp_timer_handle_t readiness_timer;
 
-    /* BLE keepalive */
+    /* SetCameraControlStatus(EXTERNAL) handshake — arms after readiness,
+     * gates the rest of the connection sequence on the response or timeout. */
+    bool               cam_ctrl_pending;
+    esp_timer_handle_t cam_ctrl_timer;
+
+    /* SetDateTime deferred-send flag — set when readiness completes but UTC
+     * is not yet session-synced.  open_gopro_ble_sync_time_all() consumes
+     * this flag and sends SetDateTime when UTC arrives. */
+    bool datetime_pending_utc;
+
+    /* BLE keepalive timer (3 s) */
     esp_timer_handle_t keepalive_timer;
 
-    /* COHN provisioning state */
-    bool cohn_provisioning;
-    bool cohn_pending_utc;  /* deferred until sync_time_all() fires */
+    /* Recording-status poll (GetStatusValue every GOPRO_STATUS_POLL_INTERVAL_MS) */
+    esp_timer_handle_t status_poll_timer;
+
+    /* Cached recording status — updated by status response handler;
+     * read by driver vtable get_recording_status (no lock — single
+     * 4-byte enum write on Xtensa LX7 is atomic). */
+    camera_recording_status_t cached_status;
 } gopro_ble_ctx_t;
 
 /* Sentinel for "no connection" */
@@ -78,15 +86,22 @@ void gopro_readiness_start(gopro_ble_ctx_t *ctx);
 void gopro_readiness_cancel(gopro_ble_ctx_t *ctx);
 
 /*
- * Called by readiness.c after the camera confirms it is ready.
- * Checks NVS for COHN credentials and branches to provisioning or ready state.
+ * Called by query.c when the SetCameraControlStatus response arrives
+ * (Feature 0xF1, Action 0xE9).  Also called by the timeout timer.
+ * Advances to camera-ready state.
  */
-void gopro_on_camera_ready(gopro_ble_ctx_t *ctx, uint32_t model_num);
+void gopro_readiness_handle_cam_ctrl_acked(gopro_ble_ctx_t *ctx, uint8_t result);
 
 /* ---- Control (control.c) ------------------------------------------------- */
 
 /* Send SetDateTime to a connected slot.  Best-effort, no retry on failure. */
 void gopro_control_set_datetime(gopro_ble_ctx_t *ctx);
+
+/* Send SetCameraControlStatus(EXTERNAL).  Returns 0 on enqueue success. */
+int  gopro_control_send_set_cam_ctrl(gopro_ble_ctx_t *ctx);
+
+/* Send SetShutter (TLV 0x01). on=true starts recording, on=false stops. */
+int  gopro_control_send_shutter(gopro_ble_ctx_t *ctx, bool on);
 
 /* Start the 3-second periodic BLE keepalive timer. */
 void gopro_keepalive_start(gopro_ble_ctx_t *ctx);
@@ -94,10 +109,20 @@ void gopro_keepalive_start(gopro_ble_ctx_t *ctx);
 /* Stop and delete the keepalive timer.  Safe if never started. */
 void gopro_keepalive_stop(gopro_ble_ctx_t *ctx);
 
-/* ---- COHN provisioning (cohn.c) ----------------------------------------- */
+/* ---- Recording-status poll (status.c) ------------------------------------ */
 
-/* Run the full COHN provisioning sequence on an established BLE connection. */
-void gopro_cohn_provision(gopro_ble_ctx_t *ctx);
+/* Start the 5 s periodic GetStatusValue poll. */
+void gopro_status_poll_start(gopro_ble_ctx_t *ctx);
+
+/* Stop and delete the status poll timer. */
+void gopro_status_poll_stop(gopro_ble_ctx_t *ctx);
+
+/*
+ * Parse a GetStatusValue response (cmd_id=0x13 already stripped) and
+ * update ctx->cached_status.  Body is a sequence of (id, len, value) tuples.
+ */
+void gopro_status_handle_response(gopro_ble_ctx_t *ctx,
+                                   const uint8_t *body, uint16_t body_len);
 
 /* ---- Response reassembly (query.c) --------------------------------------- */
 
@@ -105,7 +130,6 @@ typedef enum {
     GOPRO_CHAN_CMD,       /* cmd_resp_notify  (GP-0073) */
     GOPRO_CHAN_SETTINGS,  /* settings_resp_notify (GP-0075) */
     GOPRO_CHAN_QUERY,     /* query_resp_notify (GP-0077) */
-    GOPRO_CHAN_NET_MGMT,  /* net_mgmt_resp_notify (GP-0092) */
 } gopro_channel_t;
 
 /*

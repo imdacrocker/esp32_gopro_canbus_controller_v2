@@ -14,10 +14,10 @@ static const char *TAG = "gopro_ble/pair";
 
 /*
  * Hero11+ cameras typically initiate the ATT MTU exchange themselves shortly
- * after encryption, but Hero13 (firmware H24.x) does not — leaving the link at
- * the 23-byte default, which is too small for protobuf commands like
- * RequestConnectNew.  We initiate the exchange ourselves; cameras that already
- * exchanged simply ack the existing MTU.
+ * after encryption, but Hero13 (firmware H24.x) does not — leaving the link
+ * at the 23-byte default, which is too small for some protobuf commands.
+ * We initiate the exchange ourselves; cameras that already exchanged simply
+ * ack the existing MTU.
  */
 static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *error,
                              uint16_t mtu, void *arg)
@@ -128,16 +128,17 @@ void gopro_on_disconnected(uint16_t conn_handle, ble_addr_t addr,
     /* Cancel timers before touching ctx fields. */
     gopro_readiness_cancel(ctx);
     gopro_keepalive_stop(ctx);
+    gopro_status_poll_stop(ctx);
     gopro_query_free(ctx);
 
     /* Clear BLE context state. */
     memset(&ctx->gatt, 0, sizeof(ctx->gatt));
-    ctx->conn_handle       = GOPRO_CONN_NONE;
-    ctx->negotiated_mtu    = 0;
-    ctx->readiness_polling = false;
+    ctx->conn_handle           = GOPRO_CONN_NONE;
+    ctx->negotiated_mtu        = 0;
+    ctx->readiness_polling     = false;
     ctx->readiness_retry_count = 0;
-    ctx->cohn_provisioning = false;
-    /* Do NOT clear cohn_pending_utc — user may reconnect before UTC arrives. */
+    ctx->cached_status         = CAMERA_RECORDING_UNKNOWN;
+    /* Do NOT clear datetime_pending_utc — user may reconnect before UTC arrives. */
 
     camera_manager_on_ble_disconnected_by_handle(conn_handle);
 }

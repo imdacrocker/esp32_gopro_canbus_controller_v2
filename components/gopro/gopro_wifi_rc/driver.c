@@ -8,9 +8,8 @@
  *     called on the wifi_manager event task).
  *   - get_recording_status: direct ctx read — safe because recording_status is
  *     a single enum (≤ 4 bytes) written only by the work task on Xtensa LX7.
- *   - on_wifi_associated / on_wifi_disconnected vtable entries: NULL.  RC
- *     cameras bypass the COHN provisioning path; their connection lifecycle is
- *     driven entirely by the gopro_wifi_rc_on_station_* public API.
+ *   - on_wifi_disconnected vtable entry is NULL.  RC cameras' connection
+ *     lifecycle is driven entirely by the gopro_wifi_rc_on_station_* public API.
  */
 
 #include <string.h>
@@ -143,9 +142,8 @@ static void drv_update_slot_index(void *arg, int new_slot)
     ctx->slot = new_slot;
 }
 
-/* on_wifi_associated and on_wifi_disconnected are NULL — RC cameras bypass the
- * COHN wifi_status = WIFI_CAM_CONNECTED gate that triggers those callbacks.
- * Station events are handled via the gopro_wifi_rc_on_station_* public API. */
+/* on_wifi_disconnected is NULL — RC cameras' lifecycle is driven entirely
+ * via the gopro_wifi_rc_on_station_* public API. */
 
 static const camera_driver_t k_gopro_rc_driver = {
     .start_recording      = drv_start_recording,
@@ -153,7 +151,6 @@ static const camera_driver_t k_gopro_rc_driver = {
     .get_recording_status = drv_get_recording_status,
     .teardown             = drv_teardown,
     .update_slot_index    = drv_update_slot_index,
-    .on_wifi_associated   = NULL,
     .on_wifi_disconnected = NULL,
 };
 

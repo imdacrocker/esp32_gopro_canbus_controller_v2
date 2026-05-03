@@ -11,12 +11,15 @@
  *
  * Intentionally free of ESP-IDF headers so this file can be included by
  * host-side unit tests (§23.2).
+ *
+ * Hero5/Hero7 BLE control is reportedly functional but not officially
+ * supported by Open GoPro and not enumerated here until verified on hardware.
  */
 #pragma once
 
 #include "camera_types.h"
 
-/** True if the model is any known GoPro camera (RC-emulation or COHN). */
+/** True if the model is any known GoPro camera (RC-emulation or BLE-control). */
 static inline bool gopro_model_is_gopro(camera_model_t model)
 {
     return model == CAMERA_MODEL_GOPRO_HERO4_BLACK
@@ -38,8 +41,8 @@ static inline bool gopro_model_uses_rc_emulation(camera_model_t model)
         || model == CAMERA_MODEL_GOPRO_HERO4_SILVER;
 }
 
-/** Camera is controlled via COHN HTTPS after joining the SoftAP. */
-static inline bool gopro_model_uses_cohn(camera_model_t model)
+/** Camera is controlled over BLE (no WiFi association required). */
+static inline bool gopro_model_uses_ble_control(camera_model_t model)
 {
     return model == CAMERA_MODEL_GOPRO_HERO9_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO10_BLACK

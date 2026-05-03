@@ -1,13 +1,10 @@
 /*
- * control.c — SetDateTime and BLE keepalive timer.
+ * control.c — TLV / protobuf control commands and BLE keepalive.
  *
- * SetDateTime (0x0D) is sent best-effort after COHN provisioning and on every
- * UTC sync event.  No retry on failure.
- *
- * The BLE keepalive (0x42 to settings_write GP-0074) is sent every 3 seconds
- * to prevent the camera from auto-sleeping and to maintain the BLE link
- * supervision timeout.  Required even when COHN HTTPS is active because the
- * BLE link supervision timer is independent of WiFi/HTTP activity.
+ *   - SetDateTime (0x0D, TLV)
+ *   - SetCameraControlStatus(EXTERNAL) (Feature 0xF1, Action 0x69, protobuf)
+ *   - SetShutter (0x01, TLV)
+ *   - Keepalive (0x42 to settings_write GP-0074, every 3 s)
  *
  * Spec: https://gopro.github.io/OpenGoPro/ble/features/control.html
  */
@@ -23,26 +20,6 @@ static const char *TAG = "gopro_ble/ctrl";
 
 /* ---- SetDateTime (§15.5) ------------------------------------------------- */
 
-/*
- * SetDateTime TLV packet layout (total payload 14 bytes):
- *
- *   [0]     GPBS general header: 0x0D (length = 13)
- *   [1]     Command ID: 0x0D
- *   [2]     Param ID: 0x01 (date)
- *   [3]     Param len: 0x04
- *   [4-5]   Year (big-endian, e.g. 2026 = 0x07 0xEA)
- *   [6]     Month (1–12)
- *   [7]     Day   (1–31)
- *   [8]     Param ID: 0x02 (time)
- *   [9]     Param len: 0x03
- *   [10]    Hour   (0–23)
- *   [11]    Minute (0–59)
- *   [12]    Second (0–59)
- *
- * Total payload = 1 (cmd) + 2 (date TLV header) + 4 (date value)
- *               + 2 (time TLV header) + 3 (time value) = 12 bytes
- * GPBS header byte: 0x0C (general, len=12)
- */
 void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
 {
     if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
@@ -88,6 +65,61 @@ void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
 
     ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
                         pkt, sizeof(pkt));
+}
+
+/* ---- SetCameraControlStatus(EXTERNAL) ------------------------------------ */
+
+/*
+ * Packet layout (5 bytes total):
+ *   [0] 0x04             GPBS header (general, len=4)
+ *   [1] 0xF1             Feature ID (COMMAND)
+ *   [2] 0x69             Action ID  (RequestSetCameraControlStatus)
+ *   [3] 0x08             Protobuf field 1 tag (varint)
+ *   [4] 0x02             EnumCameraControlStatus.EXTERNAL
+ *
+ * Response (Feature 0xF1, Action 0xE9, ResponseGeneric) arrives on
+ * cmd_resp_notify and is dispatched by query.c.
+ */
+static const uint8_t k_set_cam_ctrl_pkt[5] = {
+    0x04u,
+    GOPRO_PROTO_FEATURE_COMMAND,
+    GOPRO_CMD_ACTION_SET_CAM_CTRL,
+    GOPRO_CAM_CTRL_PB_STATUS_TAG,
+    GOPRO_CAM_CTRL_EXTERNAL,
+};
+
+int gopro_control_send_set_cam_ctrl(gopro_ble_ctx_t *ctx)
+{
+    if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        ESP_LOGW(TAG, "slot %d: SetCameraControlStatus skipped — not connected",
+                 ctx->slot);
+        return -1;
+    }
+    ESP_LOGI(TAG, "slot %d: → SetCameraControlStatus(EXTERNAL)", ctx->slot);
+    return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
+                                k_set_cam_ctrl_pkt, sizeof(k_set_cam_ctrl_pkt));
+}
+
+/* ---- SetShutter (start/stop recording) ----------------------------------- */
+
+int gopro_control_send_shutter(gopro_ble_ctx_t *ctx, bool on)
+{
+    if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        ESP_LOGW(TAG, "slot %d: SetShutter skipped — not connected", ctx->slot);
+        return -1;
+    }
+
+    /* TLV: [GPBS hdr=3, cmd=0x01, param_len=0x01, value=0|1] */
+    uint8_t pkt[4] = {
+        0x03u,                       /* GPBS header: general, len=3 */
+        GOPRO_CMD_SET_SHUTTER,
+        0x01u,                       /* param length = 1 */
+        on ? 0x01u : 0x00u,
+    };
+
+    ESP_LOGI(TAG, "slot %d: → SetShutter(%s)", ctx->slot, on ? "ON" : "OFF");
+    return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
+                                pkt, sizeof(pkt));
 }
 
 /* ---- BLE keepalive (§15.1) ----------------------------------------------- */

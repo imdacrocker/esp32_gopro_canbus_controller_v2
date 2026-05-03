@@ -34,8 +34,8 @@ typedef struct {
     uint8_t  next_seq;
 } reassembly_t;
 
-/* 4 channels per slot */
-static reassembly_t s_asm[CAMERA_MAX_SLOTS][4];
+/* 3 channels per slot (CMD, SETTINGS, QUERY) */
+static reassembly_t s_asm[CAMERA_MAX_SLOTS][3];
 
 static reassembly_t *get_asm(gopro_ble_ctx_t *ctx, gopro_channel_t chan)
 {
@@ -47,16 +47,42 @@ static reassembly_t *get_asm(gopro_ble_ctx_t *ctx, gopro_channel_t chan)
 
 /* ---- Response dispatch --------------------------------------------------- */
 
-/* Forward declarations from readiness.c and cohn.c */
 extern void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
                                          const uint8_t *data, uint16_t len);
-extern void gopro_cohn_on_response(gopro_ble_ctx_t *ctx, uint8_t feature_id,
-                                    uint8_t action_id,
-                                    const uint8_t *body, uint16_t body_len);
 
 /*
- * A protobuf feature response on any channel: [feature_id, action_id, body...].
- * Strip the 2-byte header and dispatch the body to the COHN handler.
+ * Parse a ResponseGeneric body and return field 1 (EnumResultGeneric).
+ * Returns 0 if missing.
+ */
+static uint8_t parse_generic_result(const uint8_t *body, uint16_t len)
+{
+    uint16_t pos = 0;
+    while (pos < len) {
+        if (pos >= len) break;
+        uint8_t tag = body[pos++];
+        if (tag == GOPRO_RESP_GENERIC_RESULT_TAG) {
+            if (pos >= len) return 0;
+            return body[pos];
+        }
+        /* Skip unknown field. */
+        uint8_t wire = tag & 0x07u;
+        if (wire == 0) {
+            if (pos < len) pos++;
+        } else if (wire == 2) {
+            if (pos >= len) return 0;
+            uint8_t skip = body[pos++];
+            pos += skip;
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Protobuf feature response on the cmd channel: [feature_id, action_id, body...].
+ * Currently we only care about Feature 0xF1 / Action 0xE9 (SetCameraControlStatus
+ * ResponseGeneric).
  */
 static void dispatch_proto_resp(gopro_ble_ctx_t *ctx,
                                  const uint8_t *data, uint16_t len)
@@ -67,12 +93,18 @@ static void dispatch_proto_resp(gopro_ble_ctx_t *ctx,
     }
     uint8_t feature_id = data[GOPRO_PROTO_RESP_FEATURE_IDX];
     uint8_t action_id  = data[GOPRO_PROTO_RESP_ACTION_IDX];
-    ESP_LOGD(TAG, "slot %d: proto resp feat=0x%02x act=0x%02x body_len=%d",
-             ctx->slot, feature_id, action_id,
-             len - GOPRO_PROTO_RESP_HDR_LEN);
-    gopro_cohn_on_response(ctx, feature_id, action_id,
-                           data + GOPRO_PROTO_RESP_HDR_LEN,
-                           len - GOPRO_PROTO_RESP_HDR_LEN);
+    const uint8_t *body = data + GOPRO_PROTO_RESP_HDR_LEN;
+    uint16_t body_len   = len - GOPRO_PROTO_RESP_HDR_LEN;
+
+    if (feature_id == GOPRO_PROTO_FEATURE_COMMAND &&
+        action_id  == GOPRO_CMD_RESP_SET_CAM_CTRL) {
+        uint8_t result = parse_generic_result(body, body_len);
+        gopro_readiness_handle_cam_ctrl_acked(ctx, result);
+        return;
+    }
+
+    ESP_LOGD(TAG, "slot %d: unhandled proto resp feat=0x%02x act=0x%02x",
+             ctx->slot, feature_id, action_id);
 }
 
 static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
@@ -83,18 +115,12 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
     }
 
     /*
-     * Protobuf feature responses can arrive on multiple notify pipes:
-     *   - GP-0073 (cmd channel)     for feature 0xF1 (COMMAND)
-     *   - GP-0077 (query channel)   for feature 0xF5 (QUERY)
-     *   - GP-0092 (net_mgmt channel) for feature 0x02 (NETWORK_MGMT)
-     * Detect by the feature_id at byte 0 — all known feature IDs lie outside
-     * the value space used by TLV command IDs, so the same byte unambiguously
-     * tags the format.
+     * Protobuf feature responses arrive on the cmd channel (GP-0073) for
+     * feature 0xF1.  Detect by the feature_id at byte 0 — it lies outside
+     * the value space used by TLV command IDs.
      */
     uint8_t b0 = data[0];
-    if (b0 == GOPRO_PROTO_FEATURE_NETWORK_MGMT ||
-        b0 == GOPRO_PROTO_FEATURE_COMMAND ||
-        b0 == GOPRO_PROTO_FEATURE_QUERY) {
+    if (b0 == GOPRO_PROTO_FEATURE_COMMAND) {
         dispatch_proto_resp(ctx, data, len);
         return;
     }
@@ -123,12 +149,15 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         break;
 
     case GOPRO_CHAN_QUERY:
-        ESP_LOGD(TAG, "slot %d: query resp len=%d", ctx->slot, len);
-        break;
-
-    case GOPRO_CHAN_NET_MGMT:
-        ESP_LOGW(TAG, "slot %d: unexpected non-protobuf net_mgmt resp byte0=0x%02x",
-                 ctx->slot, b0);
+        if (len >= GOPRO_RESP_HDR_LEN &&
+            data[GOPRO_RESP_CMD_IDX] == GOPRO_QUERY_GET_STATUS_VALUE) {
+            /* GetStatusValue response: strip the 2-byte TLV header. */
+            gopro_status_handle_response(ctx,
+                                          data + GOPRO_RESP_HDR_LEN,
+                                          len - GOPRO_RESP_HDR_LEN);
+        } else {
+            ESP_LOGD(TAG, "slot %d: query resp len=%d", ctx->slot, len);
+        }
         break;
     }
 }

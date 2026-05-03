@@ -1,9 +1,15 @@
 /*
- * open_gopro_ble.h — Public API for the GoPro BLE provisioning component.
+ * open_gopro_ble.h — Public API for the GoPro BLE control component.
  *
- * This component handles discovery, pairing, and COHN provisioning over BLE.
- * It is the only component that directly uses the ble_core callbacks.
- * Recording commands travel over HTTPS via open_gopro_http (not BLE).
+ * This component is the camera_driver_t provider for all BLE-control GoPro
+ * models (Hero 9 and later).  It owns:
+ *   - BLE discovery, pairing, GATT setup, MTU exchange, bond management
+ *   - GetHardwareInfo readiness poll
+ *   - SetCameraControlStatus(EXTERNAL) handshake
+ *   - SetDateTime push (gated on UTC validity)
+ *   - 3 s BLE keepalive
+ *   - SetShutter (TLV 0x01) — recording start/stop
+ *   - GetStatusValue poll (5 s) — recording status
  *
  * §15 of camera_manager_design.md
  */
@@ -50,40 +56,19 @@ int open_gopro_ble_get_discovered(gopro_device_t *out, int max_count);
  */
 void open_gopro_ble_connect_by_addr(const ble_addr_t *addr);
 
-/* ---- COHN credentials ---------------------------------------------------- */
-
-/*
- * Read the COHN credentials for slot from NVS.
- * Returns true if credentials exist and were copied into the output buffers.
- * Called by open_gopro_http to construct Basic Auth headers.
- */
-bool open_gopro_ble_get_cohn_credentials(int slot,
-                                          char *user_out, size_t user_len,
-                                          char *pass_out, size_t pass_len);
-
-/* ---- Re-provisioning ----------------------------------------------------- */
-
-/*
- * Clear the NVS COHN credentials for slot and re-run the provisioning
- * sequence on the existing BLE connection.
- * Called by open_gopro_http after N consecutive HTTPS 401 responses.
- */
-void open_gopro_ble_reprovision(int slot);
-
 /* ---- UTC sync ------------------------------------------------------------ */
 
 /*
- * Send SetDateTime to every currently-connected camera and unblock any
- * provisioning sequences that were waiting for a valid UTC timestamp.
- * Called by can_manager when a GPS fix is acquired, or by the web UI
- * on a manual time-set request.
+ * Send SetDateTime to every currently-connected camera.  Called by
+ * can_manager when a GPS fix is acquired, or by the web UI on a manual
+ * time-set request.
  */
 void open_gopro_ble_sync_time_all(void);
 
 /* ---- Component lifecycle ------------------------------------------------- */
 
 /*
- * Register BLE callbacks with ble_core, register the driver with
+ * Register BLE callbacks with ble_core, register the camera_driver_t with
  * camera_manager, and purge stale bonds.
  *
  * Must be called after camera_manager_init() and before ble_core_init().

@@ -18,17 +18,9 @@ struct camera_driver {
     /* nullable — notifies driver of new slot index after compaction (§20.5) */
     void                       (*update_slot_index)(void *ctx, int new_slot);
     /*
-     * nullable — called from camera_manager_on_station_ip() when a camera
-     * joins the SoftAP with a known IP while wifi_status == WIFI_CAM_CONNECTED
-     * (i.e. BLE provisioning is done).  Driver should spawn a probe task and
-     * call camera_manager_on_wifi_connected() on success.
-     * Must not block — called on the wifi_manager event task.
-     */
-    void                       (*on_wifi_associated)(void *ctx, uint32_t ip);
-    /*
-     * nullable — called from camera_manager_on_wifi_disconnected() when the
-     * camera leaves the SoftAP.  Driver should stop any in-flight HTTP work.
-     * Must not block.
+     * nullable — called from camera_manager_on_wifi_disconnected() when a
+     * SoftAP-using camera leaves the AP.  Driver should stop any in-flight
+     * network work.  Must not block.
      */
     void                       (*on_wifi_disconnected)(void *ctx);
 };
@@ -74,8 +66,8 @@ void camera_manager_init(void);
  * loaded slots whose model satisfies matches().  Called by driver _init()
  * functions before wifi/BLE stacks are started (§21.4).
  *
- * requires_ble: pass true for COHN drivers (BLE connection is maintained as a
- *   re-provisioning fallback); false for RC-emulation drivers.  This flag
+ * requires_ble: pass true for BLE-control drivers (BLE connection is the
+ *   primary control transport); false for RC-emulation drivers.  This flag
  *   controls whether a slot counts as "disconnected" for the ble_core
  *   has_disconnected_cameras() gate (§12.9).
  */
@@ -109,51 +101,30 @@ void camera_manager_set_model(int slot, camera_model_t model);
 void camera_manager_set_name(int slot, const char *name);
 
 /*
- * Called by open_gopro_ble after COHN provisioning completes.
- * ready=true  → WIFI_CAM_CONNECTED (IP assigned; driver probe can now proceed)
- * ready=false → WIFI_CAM_NONE
- */
-void camera_manager_set_camera_ready(int slot, bool ready);
-
-/*
- * Called by open_gopro_ble after a fresh COHN provisioning round delivers
- * the camera's WiFi-side MAC and current IP via the NotifyCOHNStatus
- * protobuf body.  Atomically:
- *   - Records wifi_mac (so future on_station_ip lookups match the slot).
- *   - Sets last_ip + ip_addr to the provided value.
- *   - Sets wifi_status = WIFI_CAM_CONNECTED.
- *   - Persists the slot to NVS (so wifi_mac survives reboots).
- *   - Triggers drv->on_wifi_associated so the driver can probe.
+ * Called by a driver after its connection / readiness sequence completes
+ * and the camera is ready to accept recording commands.  Sets WIFI_CAM_READY
+ * (the enum name is retained for both transports) and starts the per-slot
+ * mismatch poll timer.
  *
- * Use this instead of set_camera_ready when fresh MAC/IP are available;
- * set_camera_ready is for the cached-credentials path where only NVS state
- * is reliable.
+ * For RC-emulation cameras this is called after the HTTP probe succeeds.
+ * For BLE-control cameras this is called after GetHardwareInfo +
+ * SetCameraControlStatus complete.
  */
-void camera_manager_on_cohn_provisioned(int slot,
-                                         const uint8_t wifi_mac[6],
-                                         uint32_t ip);
+void camera_manager_on_camera_ready(int slot);
 
-/*
- * Called by the driver after its probe succeeds.
- * Sets WIFI_CAM_READY and starts the per-slot mismatch poll timer.
- */
-void camera_manager_on_wifi_connected(int slot, uint32_t ip);
-
-/* Called when the camera leaves the SoftAP.  Stops the poll timer. */
+/* Called when a SoftAP-using camera leaves the AP.  Stops the poll timer. */
 void camera_manager_on_wifi_disconnected(int slot);
 
 /*
  * Called from the wifi_manager on_station_ip callback.
- * Updates last_ip for the matching slot (if any).
+ * Updates last_ip for the matching slot (if any).  RC-emulation only —
+ * BLE-control cameras never associate to the SoftAP.
  */
 void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip);
 
 /*
  * Called from the wifi_manager on_station_associated / on_station_disconnected
- * callbacks.  Tracks whether the camera is currently joined to our SoftAP so
- * that camera_manager_set_camera_ready() can avoid dispatching on_wifi_associated
- * with a stale IP when BLE-ready fires while the camera is off the AP.  No
- * driver dispatch happens here — on_station_ip is responsible for that.
+ * callbacks.  Tracks whether the camera is currently joined to our SoftAP.
  */
 void camera_manager_on_station_associated(const uint8_t mac[6]);
 void camera_manager_on_station_disassociated(const uint8_t mac[6]);

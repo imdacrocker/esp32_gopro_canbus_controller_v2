@@ -1,5 +1,15 @@
 /*
- * driver.c — Component init, per-slot context table, and discovery list.
+ * driver.c — Component init, per-slot context table, discovery list, and
+ * the camera_driver_t vtable for BLE-control GoPro models.
+ *
+ * Threading:
+ *   - drv_start_recording / drv_stop_recording / get_recording_status:
+ *     called from camera_manager mismatch poll task / web UI / mismatch
+ *     timer.  All forward to gopro_control_send_shutter() which posts a
+ *     GATT write through ble_core (NimBLE host task).  cached_status is a
+ *     single-enum atomic read.
+ *   - on_wifi_disconnected vtable entry: NULL — BLE-control cameras never
+ *     associate to the SoftAP.
  */
 
 #include <string.h>
@@ -141,38 +151,79 @@ void open_gopro_ble_sync_time_all(void)
             continue;
         }
         gopro_control_set_datetime(ctx);
-        if (ctx->cohn_pending_utc) {
-            ctx->cohn_pending_utc = false;
-            gopro_cohn_provision(ctx);
-        }
+        ctx->datetime_pending_utc = false;
     }
 }
 
-/* ---- Re-provisioning ----------------------------------------------------- */
+/* ---- camera_driver_t vtable --------------------------------------------- */
 
-void open_gopro_ble_reprovision(int slot)
+static esp_err_t drv_start_recording(void *arg)
 {
-    gopro_ble_ctx_t *ctx = gopro_ctx_by_slot(slot);
-    if (!ctx || ctx->conn_handle == GOPRO_CONN_NONE) {
-        ESP_LOGW(TAG, "reprovision slot %d: not connected", slot);
-        return;
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    if (gopro_control_send_shutter(ctx, true) != 0) {
+        return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "reprovision slot %d", slot);
-    gopro_cohn_provision(ctx);
+    /* Optimistically reflect the intent so the next mismatch poll cycle
+     * observes the state we just commanded; the next status poll will
+     * confirm or correct it. */
+    ctx->cached_status = CAMERA_RECORDING_ACTIVE;
+    return ESP_OK;
 }
 
-/* ---- COHN credentials ---------------------------------------------------- */
-
-bool open_gopro_ble_get_cohn_credentials(int slot,
-                                          char *user_out, size_t user_len,
-                                          char *pass_out, size_t pass_len)
+static esp_err_t drv_stop_recording(void *arg)
 {
-    /* Implemented in cohn.c — forward declaration for linker, but cohn.c
-     * exports gopro_cohn_load() which is the actual NVS reader.
-     * This shim calls it and copies into the caller's buffers. */
-    extern bool gopro_cohn_load(int slot, char *user, size_t ulen,
-                                char *pass, size_t plen);
-    return gopro_cohn_load(slot, user_out, user_len, pass_out, pass_len);
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    if (gopro_control_send_shutter(ctx, false) != 0) {
+        return ESP_FAIL;
+    }
+    ctx->cached_status = CAMERA_RECORDING_IDLE;
+    return ESP_OK;
+}
+
+static camera_recording_status_t drv_get_recording_status(void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    return ctx->cached_status;
+}
+
+static void drv_teardown(void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    gopro_status_poll_stop(ctx);
+    gopro_keepalive_stop(ctx);
+    gopro_readiness_cancel(ctx);
+    ctx->cached_status = CAMERA_RECORDING_UNKNOWN;
+    ESP_LOGI(TAG, "slot %d: teardown complete", ctx->slot);
+}
+
+static void drv_update_slot_index(void *arg, int new_slot)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+    ctx->slot = new_slot;
+}
+
+static const camera_driver_t k_gopro_ble_driver = {
+    .start_recording      = drv_start_recording,
+    .stop_recording       = drv_stop_recording,
+    .get_recording_status = drv_get_recording_status,
+    .teardown             = drv_teardown,
+    .update_slot_index    = drv_update_slot_index,
+    .on_wifi_disconnected = NULL,
+};
+
+static bool model_matches(camera_model_t model)
+{
+    return gopro_model_uses_ble_control(model);
+}
+
+static void *ctx_create(int slot)
+{
+    /* The context already exists in s_ctx[]; just hand back the pointer.
+     * conn_handle / cached_status are zero-initialised in open_gopro_ble_init. */
+    gopro_ble_ctx_t *ctx = &s_ctx[slot];
+    ctx->slot          = slot;
+    ctx->cached_status = CAMERA_RECORDING_UNKNOWN;
+    return ctx;
 }
 
 /* ---- Component init (§15.9) ---------------------------------------------- */
@@ -188,8 +239,9 @@ void open_gopro_ble_init(void)
     /* Initialise context table */
     for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
         memset(&s_ctx[i], 0, sizeof(gopro_ble_ctx_t));
-        s_ctx[i].conn_handle = GOPRO_CONN_NONE;
-        s_ctx[i].slot        = i;
+        s_ctx[i].conn_handle   = GOPRO_CONN_NONE;
+        s_ctx[i].slot          = i;
+        s_ctx[i].cached_status = CAMERA_RECORDING_UNKNOWN;
     }
 
     s_disc_mutex = xSemaphoreCreateMutex();
@@ -207,8 +259,15 @@ void open_gopro_ble_init(void)
     };
     ble_core_register_callbacks(&cbs);
 
-    /* TODO: build known-address list from camera_manager NVS records and
-     * call ble_core_purge_unknown_bonds() once address-type is persisted. */
+    /* Register the camera_driver_t with camera_manager.  requires_ble=true:
+     * BLE is the sole control transport for these models, so a slot without
+     * an active BLE connection counts as "disconnected" for ble_core's
+     * background reconnect gate. */
+    ESP_ERROR_CHECK(
+        camera_manager_register_driver(&k_gopro_ble_driver,
+                                        model_matches,
+                                        ctx_create,
+                                        true /* requires_ble */));
 
     ESP_LOGI(TAG, "init OK");
 }
