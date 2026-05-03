@@ -95,7 +95,7 @@ All frames use standard 11-bit IDs at 1 Mbps.
 | ID | Direction | Description |
 |----|-----------|-------------|
 | `0x600` | RaceCapture → ESP32 | Byte 0: `isLogging` flag (non-zero = logging) |
-| `0x601` | ESP32 → RaceCapture | Bytes 0–3: `CAMERA_CAN_STATE_*` for slots 0–3, transmitted at 5 Hz |
+| `0x601` | ESP32 → RaceCapture | Bytes 0–3: `CAMERA_CAN_STATE_*` for Cam 1, Cam 2, Cam 3, Cam 4 respectively, transmitted at 5 Hz |
 | `0x602` | RaceCapture → ESP32 | 64-bit little-endian Unix epoch in milliseconds (GPS UTC, 25 Hz once locked) |
 
 ### 0x601 Camera State Values

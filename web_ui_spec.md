@@ -520,12 +520,12 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | GET | `/api/auto-control` | — | `{ enabled: bool }` | |
 | POST | `/api/auto-control` | `{ enabled: bool }` | `{ enabled: bool }` | |
 | GET | `/api/cameras` | — | `[{ name, addr, addr_type, rssi }]` | BLE scan results |
-| GET | `/api/paired-cameras` | — | `[{ slot, index, name, model_name, type, addr, status }]` | `type`: `"ble"` or `"rc_emulation"`; `status`: `"disconnected"\|"connected"\|"not_recording"\|"recording"` |
+| GET | `/api/paired-cameras` | — | `[{ slot, index, name, model_name, type, addr, status }]` | `slot` and `index` are **1-based** — first paired camera is `1`. `type`: `"ble"` or `"rc_emulation"`; `status`: `"disconnected"\|"connected"\|"not_recording"\|"recording"` |
 | POST | `/api/scan` | — | `{}` | Starts BLE scan |
 | POST | `/api/scan-cancel` | — | `{}` | Cancels BLE scan |
 | POST | `/api/pair` | `{ addr, addr_type }` | `{}` | Initiates BLE pairing |
-| POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types) |
-| POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras |
+| POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types). `slot` is **1-based**. |
+| POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras. `slot` is **1-based**. |
 | GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations |
 | POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Starts async probe; firmware defaults to `HERO4_BLACK` |
 | POST | `/api/reboot` | — | `{}` or no response | ESP32 may drop connection before responding |

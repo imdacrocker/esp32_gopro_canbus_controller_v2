@@ -164,9 +164,12 @@ esp_err_t camera_manager_remove_slot(int slot);
 /*
  * Reorder camera slots in RAM and NVS (§20.6).
  *
- * new_order[i] is the current slot index of the camera that should occupy
- * position i after the reorder.  Example: new_order = {2, 0, 3, 1} moves
- * the camera currently in slot 2 to slot 0, slot 0 to slot 1, etc.
+ * Indices here are 0-based internal slot numbers — the http_server is
+ * responsible for converting from the 1-based external "Cam N" numbering
+ * before calling.  new_order[i] is the current slot index of the camera
+ * that should occupy position i after the reorder.  Example:
+ * new_order = {2, 0, 3, 1} moves the camera currently in slot 2 to slot 0,
+ * slot 0 to slot 1, etc.
  *
  * Returns ESP_ERR_INVALID_STATE if any camera involved in the reorder is
  * currently WIFI_CAM_READY or CAM_BLE_CONNECTED (caller responds with 409).

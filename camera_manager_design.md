@@ -960,7 +960,7 @@ State defaults to `LOGGING_STATE_UNKNOWN` on boot. The first received `0x600` fr
 
 **`0x601` — ESP32 → RaceCapture: camera status broadcast**
 
-Transmitted at 5 Hz (every 200 ms) by a periodic `esp_timer` callback regardless of bus activity. Bytes 0–3 carry `CAMERA_STATE_*` values for camera slots 0–3:
+Transmitted at 5 Hz (every 200 ms) by a periodic `esp_timer` callback regardless of bus activity. Bytes 0–3 carry `CAMERA_STATE_*` values for Cam 1, Cam 2, Cam 3, Cam 4 respectively (the externally-visible camera numbering is 1-based; the CAN frame's first byte corresponds to the first paired camera):
 
 ```
 CAMERA_STATE_UNDEFINED    = 0   Slot not configured / no information yet
@@ -1649,8 +1649,10 @@ esp_err_t camera_manager_reorder_slots(const int *new_order, int count);
 
 ```
 POST /api/reorder-cameras
-Body: { "order": [2, 0, 3, 1] }
-  — new_order[0]=2 means "put the camera currently in slot 2 into slot 0"
+Body: { "order": [3, 1, 4, 2] }
+  — order[0]=3 means "put the camera currently at position 3 into position 1"
+  — Camera positions in the API are 1-based; camera_manager_reorder_slots()
+    receives 0-based indices after API-boundary conversion in api_cameras.c
 Response: 200 OK on success, 409 Conflict if any camera is currently connected
 ```
 

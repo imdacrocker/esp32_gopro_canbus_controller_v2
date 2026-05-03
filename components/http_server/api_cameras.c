@@ -56,7 +56,14 @@ static const char *camera_status_str(const camera_slot_info_t *info)
     return "disconnected";
 }
 
-/* ---- GET /api/paired-cameras --------------------------------------------- */
+/* ---- GET /api/paired-cameras ---------------------------------------------
+ *
+ * The `slot` and `index` fields in the JSON are 1-based — the first paired
+ * camera is "Cam 1".  Internally the camera_manager uses 0-based array
+ * indices; conversion happens at this API boundary.  POST handlers that
+ * accept a `slot` field expect the same 1-based value and decrement on the
+ * way in.
+ */
 
 static esp_err_t handler_paired_cameras(httpd_req_t *req)
 {
@@ -85,6 +92,7 @@ static esp_err_t handler_paired_cameras(httpd_req_t *req)
                              ? "rc_emulation" : "ble";
         const char *status = camera_status_str(&info);
 
+        int external = i + 1;   /* 1-based for the API surface */
         int n = snprintf(buf + pos, BUF_SIZE - pos,
             "%s{"
             "\"slot\":%d,"
@@ -96,7 +104,7 @@ static esp_err_t handler_paired_cameras(httpd_req_t *req)
             "\"status\":\"%s\""
             "}",
             (i == 0) ? "" : ",",
-            i, i,
+            external, external,
             info.name,
             model_name_str(info.model),
             type,
@@ -145,10 +153,11 @@ static esp_err_t handler_shutter(httpd_req_t *req)
     int dispatched = 0;
 
     if (cJSON_IsNumber(slot_item)) {
-        int slot = (int)cJSON_GetNumberValue(slot_item);
+        int external = (int)cJSON_GetNumberValue(slot_item);
+        int slot = external - 1;   /* API is 1-based; internal is 0-based */
         camera_manager_set_desired_recording_slot(slot, intent);
         dispatched = 1;
-        ESP_LOGI(TAG, "shutter %s → slot %d", record ? "start" : "stop", slot);
+        ESP_LOGI(TAG, "shutter %s → Cam %d", record ? "start" : "stop", external);
     } else {
         camera_manager_set_desired_recording_all(intent);
         dispatched = camera_manager_get_slot_count();
@@ -182,7 +191,8 @@ static esp_err_t handler_remove_camera(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing 'slot'");
         return ESP_FAIL;
     }
-    int slot = (int)cJSON_GetNumberValue(slot_item);
+    int external = (int)cJSON_GetNumberValue(slot_item);
+    int slot = external - 1;   /* API is 1-based; internal is 0-based */
     cJSON_Delete(root);
 
     esp_err_t err = camera_manager_remove_slot(slot);
@@ -191,7 +201,7 @@ static esp_err_t handler_remove_camera(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "removed camera slot %d", slot);
+    ESP_LOGI(TAG, "removed Cam %d", external);
     send_json(req, "{}");
     return ESP_OK;
 }
@@ -230,7 +240,8 @@ static esp_err_t handler_reorder_cameras(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "non-numeric in order");
             return ESP_FAIL;
         }
-        new_order[i] = (int)cJSON_GetNumberValue(el);
+        /* API is 1-based; camera_manager expects 0-based */
+        new_order[i] = (int)cJSON_GetNumberValue(el) - 1;
     }
     cJSON_Delete(root);
 
