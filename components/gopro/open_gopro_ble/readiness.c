@@ -161,6 +161,12 @@ void gopro_on_camera_ready(gopro_ble_ctx_t *ctx, uint32_t model_num)
         /* Send datetime on best-effort basis if UTC is available. */
         gopro_control_set_datetime(ctx);
         camera_manager_on_ble_ready(ctx->slot);
+        /* Cached-credential path: transition wifi_status → CONNECTED so
+         * on_station_ip can dispatch the HTTP probe (or, if last_ip is
+         * already populated from an earlier DHCP event during this boot,
+         * dispatch the probe now).  Without this, the COHN driver never
+         * starts after a reboot. */
+        camera_manager_set_camera_ready(ctx->slot, true);
         gopro_keepalive_start(ctx);
     } else {
         /* Need to provision COHN. */
