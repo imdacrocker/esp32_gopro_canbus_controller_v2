@@ -142,6 +142,12 @@ void gopro_on_camera_ready(gopro_ble_ctx_t *ctx, uint32_t model_num)
 
     camera_manager_set_model(ctx->slot, model);
 
+    esp_err_t save_err = camera_manager_save_slot(ctx->slot);
+    if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "slot %d: NVS save after pairing failed: %s",
+                 ctx->slot, esp_err_to_name(save_err));
+    }
+
     /* Check NVS for existing COHN credentials. */
     char user[32];
     char pass[64];
