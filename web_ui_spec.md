@@ -552,10 +552,9 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 
 ## 17. Open Items / Known V2 Decisions
 
-- **Camera type field:** V2 API uses `"rc_emulation"` (not `"legacy_wifi"`). UI badge text is "WiFi RC". ✅ Resolved.
+- **Camera type field:** V2 API uses `"rc_emulation"` for Hero 4 and `"ble"` for Hero 9+ (not `"legacy_wifi"` / `"cohn"`). UI badge text is "WiFi RC" / "BLE". ✅ Resolved.
 - **Model selection for RC-emulation cameras:** Firmware defaults to `HERO4_BLACK`; no model picker in the UI. ✅ Resolved (deferred).
-- **COHN cameras:** No UI for provisioning COHN credentials. V2 may trigger the flow from BLE pairing completion rather than a separate UI step — TBD.
-- **COHN re-provisioning:** No trigger in the UI if credentials become stale. User would need a way to re-initiate BLE provisioning from a paired camera row — TBD.
+- **BLE-control cameras (Hero 9+):** Pairing alone is sufficient — there is no separate provisioning step. The post-readiness sequence (`GetHardwareInfo` → `SetCameraControlStatus(EXTERNAL)` → `SetDateTime` → status poll) runs automatically inside `open_gopro_ble`. ✅ Resolved.
 - **BLE status granularity:** Four states (`disconnected` / `connected` / `not_recording` / `recording`) match V2 camera_manager — no UI change needed.
 - **Color palette:** V2 should use CSS custom properties (`:root { --blue: #2980b9; … }`) for maintainability.
 - **Settings → Device section:** May need additional entries (e.g. per-camera name edit) — TBD.

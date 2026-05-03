@@ -1,32 +1,37 @@
 # open_gopro_ble
 
-Handles everything GoPro-specific that requires BLE: camera discovery, pairing, COHN credential provisioning, and ongoing BLE keepalive. It is the only component that registers callbacks with `ble_core` and the only component that writes GoPro BLE characteristics.
+The complete BLE control driver for Hero 9+ GoPro cameras. It owns discovery, pairing, GATT setup, the post-connection readiness sequence, the periodic recording-status poll, and all recording commands. It is the only component that registers callbacks with `ble_core` and the only component that writes GoPro BLE characteristics.
 
-Recording commands are **not** sent over BLE. Once COHN provisioning is complete, all recording control travels over HTTPS via `open_gopro_http`. BLE is held open as a re-provisioning fallback and for the 3-second keepalive required to maintain the BLE link supervision timer.
+All recording control travels over BLE — there is no HTTPS path. The BLE connection is held open continuously; loss of link is the same signal as "camera went away".
 
 ---
 
 ## Responsibilities
 
-- **Discovery**: filter BLE advertisements by the GoPro service UUID (`0xFEA6`); maintain a 10-entry list for the web UI (`GET /api/cameras`).
-- **Pairing**: register new cameras into `camera_manager` on first bond; reconnect known cameras from NVS bond store.
-- **GATT setup**: discover all characteristics across the full handle range, then subscribe CCCDs for all notify/indicate characteristics.
-- **Readiness poll**: send `GetHardwareInfo` (0x3C) after GATT setup; retry up to 10× at 3-second intervals. Parse the positional LV body (model number, model name, firmware, serial, AP SSID, AP MAC), log them at INFO, and hand the model number to `camera_manager` as `camera_model_t`.
-- **COHN provisioning**: when the camera is ready and no COHN credentials exist in NVS, run the 4-step provisioning sequence over the network management channel (GP-0091/0092).
-- **UTC sync**: send `SetDateTime` to all connected cameras when UTC is live-synced this session; unblock any provisioning sequences that were waiting for it. `SetDateTime` is internally gated on `can_manager_utc_is_session_synced()`, so an NVS-restored UTC at boot does not push stale time to a camera.
-- **BLE keepalive**: send `0x42` to the settings channel (GP-0074) every 3 seconds to prevent camera auto-sleep.
-- **Re-provisioning**: expose `open_gopro_ble_reprovision()` for `open_gopro_http` to call after repeated HTTPS 401 responses.
+- **Discovery** — filter BLE advertisements by the GoPro service UUID (`0xFEA6`); maintain a 10-entry list for the web UI (`GET /api/cameras`).
+- **Pairing** — register new cameras into `camera_manager` on first bond; reconnect known cameras from NVS bond store.
+- **GATT setup** — discover all characteristics across the full handle range, then subscribe CCCDs for all notify/indicate characteristics.
+- **Readiness sequence** (V1-style):
+  1. `GetHardwareInfo` (TLV 0x3C) poll until status = 0 (up to 10× at 3 s intervals). Parse the positional LV body (model number, model name, firmware, serial, AP SSID, AP MAC); the model number is handed to `camera_manager` as `camera_model_t`.
+  2. `SetCameraControlStatus(EXTERNAL)` — protobuf Feature 0xF1 / Action 0x69 to GP-0072. Wait for `ResponseGeneric` on Action 0xE9, with a 3 s timeout. Connection sequence advances on either ack or timeout.
+  3. `camera_manager_on_camera_ready(slot)` — slot transitions to `WIFI_CAM_READY` and the mismatch-correction timer arms.
+  4. `SetDateTime` (best-effort; deferred via `datetime_pending_utc` if UTC isn't session-synced yet).
+  5. Start the 5 s `GetStatusValue` poll.
+- **Recording control** — `SetShutter` TLV 0x01 to GP-0072 (`{0x03, 0x01, 0x01, 0x00|0x01}`).
+- **Recording status poll** — `GetStatusValue` TLV 0x13 on GP-0076 every 5 s, requesting status ID 8 (`system_record_mode_active`). Cached value is exposed via `camera_driver_t.get_recording_status()`.
+- **UTC sync** — `open_gopro_ble_sync_time_all()` sends `SetDateTime` to every connected slot when UTC becomes session-synced (called from `on_utc_acquired`). `SetDateTime` itself is gated on `can_manager_utc_is_session_synced()`, so an NVS-restored boot value cannot push stale time to a camera.
+- **BLE keepalive** — send `0x42` to GP-0074 every 3 s to maintain the link supervision timer and prevent camera auto-sleep.
 
 ---
 
 ## Dependencies
 
 ```
-REQUIRES: bt, nvs_flash, esp_wifi, esp_timer, freertos, camera_manager, can_manager, ble_core
+REQUIRES: bt, nvs_flash, esp_timer, freertos, camera_manager, can_manager, ble_core
 ```
 
-**Precondition:** `camera_manager_init()` must be called before `open_gopro_ble_init()`.  
-`open_gopro_ble_init()` must be called before `ble_core_init()` — it registers the BLE callbacks that `ble_core` will use once the host task starts.
+**Precondition:** `camera_manager_init()` must be called before `open_gopro_ble_init()`.
+`open_gopro_ble_init()` must be called before `ble_core_init()` — it registers the BLE callbacks that `ble_core` will use once the host task starts, and the `camera_driver_t` that `camera_manager` will dispatch to.
 
 ---
 
@@ -34,16 +39,16 @@ REQUIRES: bt, nvs_flash, esp_wifi, esp_timer, freertos, camera_manager, can_mana
 
 | File | Responsibility |
 |------|---------------|
-| `include/open_gopro_ble.h` | Public API |
-| `include/open_gopro_ble_spec.h` | All raw constants: GoPro GATT UUIDs, command IDs, GPBS header format, COHN protobuf field tags, response field offsets |
+| `include/open_gopro_ble.h` | Public API (lifecycle, discovery, time sync) |
+| `include/open_gopro_ble_spec.h` | All raw protocol constants: GoPro GATT UUIDs, command IDs, GPBS header format, protobuf field tags, response field offsets, poll intervals, retry caps |
 | `open_gopro_ble_internal.h` | Private shared types (`gopro_gatt_handles_t`, `gopro_ble_ctx_t`, `gopro_channel_t`) and internal function declarations |
-| `driver.c` | Per-slot context table, discovery list with UUID filter, `open_gopro_ble_init()` |
-| `pairing.c` | `on_connected` / `on_encrypted` / `on_disconnected` callbacks registered with `ble_core` |
-| `gatt.c` | Full-handle-range service/characteristic discovery, sequential CCCD subscription state machine. No explicit MTU exchange — the camera initiates and NimBLE replies with `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU`. |
-| `readiness.c` | `GetHardwareInfo` retry loop; positional length-value (LV) hardware-info parser that logs model number/name, firmware, serial, AP SSID and MAC; branches to provisioning or ready |
-| `control.c` | `SetDateTime` TLV packet builder; 3-second periodic keepalive timer |
-| `cohn.c` | COHN 4-step provisioning sequence; hand-rolled protobuf encode/decode; NVS `cam_N/gopro_cohn` read/write |
-| `query.c` | GPBS packet reassembler (general / ext-13 / ext-16 headers, continuation packets); 4-channel response dispatch |
+| `driver.c` | Per-slot context table, discovery list with UUID filter, `camera_driver_t` vtable, driver registration, `open_gopro_ble_init()` |
+| `pairing.c` | `on_connected` / `on_encrypted` / `on_disconnected` callbacks; explicit MTU exchange (Hero 13 does not initiate one) |
+| `gatt.c` | Full-handle-range service/characteristic discovery, sequential CCCD subscription state machine |
+| `readiness.c` | `GetHardwareInfo` retry loop, hardware-info LV parser, `SetCameraControlStatus(EXTERNAL)` handshake with timeout, drives the post-readiness sequence |
+| `control.c` | `SetDateTime`, `SetCameraControlStatus`, `SetShutter` packet builders; 3 s keepalive timer |
+| `status.c` | 5 s `GetStatusValue` poll timer; status response parser updating cached `camera_recording_status_t` |
+| `query.c` | GPBS packet reassembler (general / ext-13 / ext-16 headers, continuation packets); 3-channel response dispatch |
 | `notify.c` | `on_notify_rx` callback — maps `attr_handle` to `gopro_channel_t`, feeds `gopro_query_feed()` |
 
 ---
@@ -64,21 +69,15 @@ int  open_gopro_ble_get_discovered(gopro_device_t *out, int max_count);
 /* Connection */
 void open_gopro_ble_connect_by_addr(const ble_addr_t *addr);
 
-/* COHN credentials — called by open_gopro_http to build Basic Auth headers */
-bool open_gopro_ble_get_cohn_credentials(int slot,
-                                          char *user_out, size_t user_len,
-                                          char *pass_out, size_t pass_len);
-
-/* Re-provisioning — called by open_gopro_http after repeated HTTPS 401 */
-void open_gopro_ble_reprovision(int slot);
-
 /* UTC sync — called by main.c on the first live UTC source this session
  * (GPS frame or web-UI manual set).  Sends SetDateTime to every connected
- * slot and unblocks any cohn_pending_utc.  No-op for individual slots when
- * UTC is not session-synced (so an NVS-restored boot value cannot push
- * stale time to a camera). */
+ * slot and clears any pending datetime_pending_utc flag.  No-op for
+ * individual slots when UTC is not session-synced (so an NVS-restored boot
+ * value cannot push stale time to a camera). */
 void open_gopro_ble_sync_time_all(void);
 ```
+
+The recording commands (`start_recording` / `stop_recording`) and status query (`get_recording_status`) are exposed via the `camera_driver_t` vtable, not as public functions.
 
 ---
 
@@ -88,18 +87,12 @@ All GoPro characteristics use the 128-bit base UUID `b5f9XXXX-aa8d-11e3-9046-000
 
 | Handle name | UUID suffix | Direction | Channel |
 |------------|-------------|-----------|---------|
-| `cmd_write` | `0072` | Write | Commands — TLV + COMMAND-feature protobuf (incl. COHN) |
+| `cmd_write` | `0072` | Write | TLV commands + COMMAND-feature protobuf (`SetShutter`, `SetDateTime`, `SetCameraControlStatus`, `GetHardwareInfo`) |
 | `cmd_resp_notify` | `0073` | Notify | Command responses (TLV + protobuf) |
-| `settings_write` | `0074` | Write | Settings / keepalive |
-| `settings_resp_notify` | `0075` | Notify | Settings responses |
-| `query_write` | `0076` | Write | Queries |
-| `query_resp_notify` | `0077` | Notify | Query responses |
-| `net_mgmt_cmd_write` | `0091` | Write | NETWORK_MGMT-feature protobuf (WiFi connect/scan) |
-| `net_mgmt_resp_notify` | `0092` | Notify | NETWORK_MGMT responses |
-| `wifi_ap_pwr_write` | `0001` | Write | WiFi AP power (RC-emulation) |
-| `wifi_ap_ssid_read` | `0002` | Read | WiFi AP SSID (RC-emulation) |
-| `wifi_ap_pass_read` | `0003` | Read | WiFi AP password (RC-emulation) |
-| `wifi_ap_state_indicate` | `0004` | Indicate | WiFi AP state (RC-emulation) |
+| `settings_write` | `0074` | Write | Keepalive (0x42) |
+| `settings_resp_notify` | `0075` | Notify | Settings responses (acknowledged but not acted on) |
+| `query_write` | `0076` | Write | TLV queries (`GetStatusValue`) |
+| `query_resp_notify` | `0077` | Notify | Query responses (status updates) |
 
 CCCDs are subscribed sequentially after characteristic discovery. GoPro cameras do not persist CCCD state across connections — subscriptions are re-sent on every reconnection.
 
@@ -115,119 +108,89 @@ on_connected(conn_handle, addr)
 on_encrypted(conn_handle, addr)
   known camera  → camera_manager_on_ble_connected()
   new camera    → camera_manager_register_new(); if slots full → disconnect
-  → snapshot current ATT MTU via ble_att_mtu() (camera will typically
-    initiate an MTU exchange shortly after; we don't initiate one ourselves)
+  → ble_gattc_exchange_mtu()  (Hero 13 doesn't initiate one itself)
   → gopro_gatt_start_discovery()
 
-gatt discovery complete
-  → subscribe CCCDs sequentially (5 total)
+GATT discovery complete
+  → subscribe CCCDs sequentially (3 notify channels)
   → gopro_readiness_start()
 
-GetHardwareInfo (up to 10 retries × 3 s)
-  success → extract model_num → camera_manager_set_model()
-           → check NVS for cam_N/gopro_cohn
-             credentials present  → SetDateTime (best-effort; internally
-                                                  skipped unless UTC is
-                                                  session-synced this boot)
-                                  → camera_manager_on_ble_ready()
-                                  → start keepalive timer
-             credentials absent   → SetDateTime (same gating as above)
-                                  → any UTC anchor (incl. NVS-restored)?
-                                      yes → gopro_cohn_provision()
-                                      no  → set cohn_pending_utc, start keepalive
+GetHardwareInfo poll  (up to 10 retries × 3 s)
+  success → parse model + log info → camera_manager_set_model() + save_slot()
+          → camera_manager_on_ble_ready()
+          → start keepalive timer
+          → SetCameraControlStatus(EXTERNAL) → wait for 0xE9 response (3 s timeout)
+                ack or timeout →
+                  camera_manager_on_camera_ready()
+                  SetDateTime (best-effort; deferred via datetime_pending_utc
+                               if UTC not session-synced)
+                  start 5 s GetStatusValue poll
   failure → retry; after 10 failures → ble_gap_terminate()
 
 on_disconnected
-  → cancel readiness timer, stop keepalive timer
+  → cancel readiness timer
+  → cancel SetCameraControlStatus timeout
+  → stop keepalive timer
+  → stop status poll timer
   → free reassembly state
-  → clear gopro_gatt_handles_t and conn_handle
+  → clear gopro_gatt_handles_t and conn_handle, reset cached_status
   → camera_manager_on_ble_disconnected_by_handle()
 ```
 
 ---
 
-## COHN Provisioning Sequence
+## Recording Commands
 
-Runs when `cam_N/gopro_cohn` has no valid credentials, or when `open_gopro_ble_reprovision()` is called.
+### SetShutter (TLV 0x01)
 
 ```
-1. RequestStartScan        → GP-0091 (feature 0x02, action 0x02)
-     - Required to put the camera into STA mode.  Without it, the camera
-       stays in AP mode and silently drops the next ConnectNew with no
-       response of any kind.
-     - Wait for NotifStartScanning (action 0x0B) with
-                scanning_state == SCANNING_SUCCESS (5).
-
-2. RequestConnectNew       → GP-0091 (feature 0x02, action 0x05)
-     - Body fields:
-         ssid               = SoftAP SSID (e.g. "HERO-RC-D8D3FD")
-         password           = "00000000"  ← see note below
-         bypass_eula_check  = true
-     - Camera ignores the password since our SoftAP advertises open auth,
-       but the field must be a non-empty string: omitting the (proto-
-       required) field returns RESULT_ILL_FORMED, and an empty string
-       makes the camera attempt a WPA-PSK handshake against an open AP
-       and fail with PROVISIONING_ERROR_PASSWORD_AUTH.  Any non-empty
-       placeholder satisfies the proto validator and is then ignored.
-     - bypass_eula_check skips the camera's "verify internet" gate; on
-       an isolated SoftAP without an uplink the camera otherwise stalls
-       waiting for the EULA check to resolve and never responds.
-     - Wait for NotifProvisioningState (action 0x0C) with
-                provisioning_state == SUCCESS_NEW_AP (5)
-                                   or SUCCESS_OLD_AP (6).
-
-3. RequestCreateCOHNCert{override=true}  → GP-0072 (feature 0xF1, action 0x67)
-     - This is what actually transitions COHN status from UNPROVISIONED
-       to PROVISIONED on Hero11+; ConnectNew alone leaves the camera
-       associated to the AP but with COHN disabled.
-     - override=true forces a fresh certificate even if one was retained
-       from a previous session.
-     - Wait for ResponseCreateCOHNCert (action 0xE7) with
-                EnumResultGeneric == SUCCESS (1).
-
-4. RequestGetCOHNStatus    → GP-0076 (feature 0xF5, action 0x6F)
-     - Note the channel: this is the QUERY characteristic, not COMMAND.
-       (Sending it on GP-0072 returns UNPROVISIONED forever.)
-     - First call sets register_cohn_status=true so the camera also
-       pushes status updates spontaneously; later poll calls send empty
-       body.  Polled every 2 s, up to 15 attempts (~30 s total).
-     - Wait for NotifyCOHNStatus with
-                 status     == COHN_PROVISIONED (1)
-              && state      == NetworkConnected (27)
-              && username, password, ipaddress, macaddress all populated.
-
-5. Save credentials to NVS: cam_N/gopro_cohn { cohn_user[32], cohn_pass[64] }
-
-6. camera_manager_on_cohn_provisioned(slot, wifi_mac, ip)
-     - Records wifi_mac (parsed from NotifyCOHNStatus field 8) and ip
-       (field 5, parsed via ip4addr_aton) atomically.
-     - The wifi_mac is critical: GoPros have separate BLE and WiFi
-       radios with different MACs.  Without storing the WiFi MAC, the
-       slot can be found from BLE events but not from DHCP / station
-       events, and the HTTP driver never gets triggered.
-     - Sets wifi_status = WIFI_CAM_CONNECTED, persists wifi_mac to NVS,
-       and dispatches drv->on_wifi_associated → open_gopro_http probe →
-       WIFI_CAM_READY.
+[0x03, 0x01, 0x01, value]
+  byte 0 : GPBS general header, payload length 3
+  byte 1 : command ID 0x01 (SetShutter)
+  byte 2 : param length 1
+  byte 3 : 0x00 = stop, 0x01 = start
 ```
 
-TLS certificate verification is skipped (`ssl.CERT_NONE`). The SoftAP is a private closed network; Basic Auth credentials provide adequate protection on that link.
+Written to GP-0072. The driver vtable `start_recording` / `stop_recording` set `cached_status` optimistically (`ACTIVE` / `IDLE`) immediately after the write returns; the next status poll cycle confirms or corrects it.
 
-**Protocol gotchas worth knowing:**
+### GetStatusValue (TLV 0x13)
 
-- **MTU exchange.** Hero11 / earlier initiate the MTU exchange themselves shortly after encryption; **Hero13 (firmware H24.x) does not.** `pairing.c` calls `ble_gattc_exchange_mtu()` explicitly — without that, the default 23-byte MTU silently rejects the 23-byte ConnectNew packet.
-- **Channel matters for protobuf feature IDs.** Each feature lives on a fixed pair of characteristics; sending the right action_id on the wrong channel returns nothing:
-  | Feature | ID | Write | Notify |
-  |---|---|---|---|
-  | NETWORK_MGMT (scan, connect) | `0x02` | GP-0091 | GP-0092 |
-  | COMMAND (cert ops, set-setting) | `0xF1` | GP-0072 | GP-0073 |
-  | QUERY (cert + status reads) | `0xF5` | GP-0076 | GP-0077 |
-- **Two error enums look alike.** `ResponseConnectNew` carries both a `result` (field 1, `EnumResultGeneric` — `2 = ILL_FORMED`) and a `provisioning_state` (field 2, `EnumProvisioning` — `2 = STARTED`). Logging which enum a numeric value belongs to saves real debugging time.
+```
+Request:  [0x02, 0x13, 0x08]   (header len=2, cmd 0x13, status_id 8)
+Response: [cmd_id, status, 0x08, 0x01, value]
+                            └── id ┘ └─len─┘ └─v─┘
+```
+
+Status ID 8 is `system_record_mode_active` (0 = idle, 1 = recording). Polled every 5 s on `query_write` (GP-0076); response arrives on `query_resp_notify` (GP-0077). The poll fires once immediately on start so `cached_status` updates within ~half an MTU latency rather than waiting the full 5 s.
+
+### SetCameraControlStatus(EXTERNAL) (Protobuf)
+
+```
+[0x04, 0xF1, 0x69, 0x08, 0x02]
+  byte 0 : GPBS general header, payload length 4
+  byte 1 : feature ID 0xF1 (COMMAND)
+  byte 2 : action ID 0x69 (RequestSetCameraControlStatus)
+  byte 3 : protobuf field-1 tag (varint)
+  byte 4 : EnumCameraControlStatus.EXTERNAL (2)
+```
+
+Sent once per connection after `GetHardwareInfo` succeeds. Declares to the camera that an external controller is driving it (suppresses some on-screen UI). Response is `ResponseGeneric` on Feature 0xF1 / Action 0xE9; the connection sequence proceeds on ack OR after a 3 s timeout — a silent camera should not stall setup.
+
+### SetDateTime (TLV 0x0D)
+
+```
+[0x0C, 0x0D,
+ 0x01, 0x04, year_hi, year_lo, month, day,        ← param 1: date
+ 0x02, 0x03, hour, minute, second]                ← param 2: time
+```
+
+Best-effort. Internally gated on `can_manager_utc_is_session_synced()`. If UTC isn't session-synced when readiness completes, the driver sets `datetime_pending_utc` on the slot's context and `open_gopro_ble_sync_time_all()` consumes the flag when UTC becomes available.
 
 ---
 
 ## GPBS Packet Reassembly
 
-GoPro cameras may fragment long responses across multiple ATT notifications. `query.c` maintains a per-slot, per-channel reassembly buffer.
+GoPro cameras may fragment long responses across multiple ATT notifications. `query.c` maintains a per-slot, per-channel reassembly buffer (3 channels × `CAMERA_MAX_SLOTS`).
 
 **Start packet header:**
 
@@ -239,31 +202,26 @@ GoPro cameras may fragment long responses across multiple ATT notifications. `qu
 
 **Continuation packet:** bit 7 set; low 7 bits = sequence number (starts at 0).
 
-Maximum reassembled response: 512 bytes (covers all known GoPro responses including `GetHardwareInfo` at ~88 bytes and `GetCOHNStatus` at ~120 bytes).
+Maximum reassembled response: 512 bytes (covers all known responses including `GetHardwareInfo` at ~88 bytes and small status responses).
 
 ---
 
 ## NVS Layout
 
-This component exclusively owns the `gopro_cohn` key in each slot namespace. `camera_manager` never reads or writes it.
-
-```
-cam_0/gopro_cohn  ← gopro_cohn_nv_record_t { cohn_user[32], cohn_pass[64] }
-cam_1/gopro_cohn
-cam_2/gopro_cohn
-cam_3/gopro_cohn
-```
-
-The key is erased at the start of a re-provisioning sequence and re-written only after a confirmed `RequestGetCOHNStatus` response with `status == CONNECTED`.
+This component does not own any NVS key. The slot record (`cam_N/camera`) is owned by `camera_manager`; bond storage is owned by NimBLE.
 
 ---
 
-## BLE Keepalive
+## Threading
 
-The keepalive prevents camera auto-sleep and maintains the BLE link supervision timer independently of WiFi/HTTP activity. It is required even when COHN is active and all recording commands are going over HTTPS.
+All BLE operations (callbacks, GATT writes, response dispatch) run on the **NimBLE host task** (core 1). All `esp_timer` callbacks (readiness poll, keepalive, status poll, SetCameraControlStatus timeout) run on the **esp_timer task** (core 0). GATT writes from timer callbacks go through `ble_core_gatt_write()` which posts work back to the host task.
 
-- **Write target:** `settings_write` (GP-0074)
-- **Payload:** `[0x01, 0x42]` (GPBS general header len=1, value=0x42)
-- **Period:** 3 seconds (periodic `esp_timer`)
-- **Started:** after `GetHardwareInfo` succeeds, before COHN provisioning
-- **Stopped:** on disconnect, in `on_disconnected` before context is cleared
+Driver vtable entries (`start_recording`, `stop_recording`, `get_recording_status`) may be called from any task (mismatch poll, web UI, manual override). `cached_status` is a single-enum read/write on Xtensa LX7, atomic by virtue of size; no lock is held.
+
+---
+
+## Protocol Notes
+
+- **MTU exchange.** Hero11 / earlier initiate the MTU exchange themselves shortly after encryption; **Hero13 (firmware H24.x) does not.** `pairing.c` calls `ble_gattc_exchange_mtu()` explicitly — without that, the default 23-byte MTU truncates protobuf packets.
+- **Channel matters for protobuf feature IDs.** Each feature lives on a fixed pair of characteristics. We use only Feature 0xF1 (COMMAND) for `SetCameraControlStatus`; sending the right action_id on the wrong channel returns nothing.
+- **Pre-Hero9 BLE control** (Hero 5, Hero 7) is reportedly functional but not officially supported by Open GoPro. The capability helper `gopro_model_uses_ble_control()` only enumerates the officially-supported list. Older models can be added once verified on hardware.

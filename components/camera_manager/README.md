@@ -2,7 +2,7 @@
 
 Manages up to four camera slots: per-slot state (BLE and WiFi connection status, recording intent), NVS persistence, driver vtable dispatch, and the periodic mismatch-correction loop that keeps each camera's actual recording state aligned with the operator's intent.
 
-`camera_manager` is the hub that infrastructure components (`ble_core`, `wifi_manager`) and protocol drivers (`open_gopro_ble`, `open_gopro_http`, `gopro_wifi_rc`, `can_manager`) all wire into. It has no direct knowledge of GoPro-specific protocols — behavioral branching by model lives in `gopro/gopro_model.h` and is called only by the driver components.
+`camera_manager` is the hub that infrastructure components (`ble_core`, `wifi_manager`) and protocol drivers (`open_gopro_ble`, `gopro_wifi_rc`, `can_manager`) all wire into. It has no direct knowledge of GoPro-specific protocols — behavioral branching by model lives in `gopro/gopro_model.h` and is called only by the driver components.
 
 ---
 
@@ -41,16 +41,15 @@ REQUIRES: bt (ble_addr_t type), nvs_flash, esp_timer, freertos
 
 ## NVS Layout
 
-Each slot occupies namespace `cam_N` (N = 0–3). Only `camera_manager` writes the `camera` key; driver components own their own keys in the same namespace.
+Each slot occupies namespace `cam_N` (N = 0–3). Only `camera_manager` writes the `camera` key.
 
 ```
 cam_0/camera   ← camera_nv_record_t (schema version 1)
-cam_0/gopro_cohn  ← owned by open_gopro_ble (not touched here)
 cam_1/camera
 ...
 ```
 
-**Schema version policy:** a blob with a mismatched `version` byte is discarded and the slot is left unconfigured. Re-pairing is required. No automatic migration. **Appending new fields at the end of `camera_nv_record_t` is not a version bump** — `load_slot_from_nvs()` zero-initializes the record before `nvs_get_blob`, so smaller legacy blobs leave any new trailing fields zero (the most recent example is `wifi_mac`).
+**Schema version policy:** a blob with a mismatched `version` byte is discarded and the slot is left unconfigured. Re-pairing is required. No automatic migration. **Appending new fields at the end of `camera_nv_record_t` is not a version bump** — `load_slot_from_nvs()` zero-initializes the record before `nvs_get_blob`, so smaller legacy blobs leave any new trailing fields zero.
 
 **Save-time validation:** `camera_manager_save_slot()` returns `ESP_ERR_INVALID_ARG` and refuses to write if `model == CAMERA_MODEL_UNKNOWN`.
 
@@ -61,7 +60,7 @@ cam_1/camera
 Drivers call `camera_manager_register_driver()` from their own `_init()` functions — `camera_manager` never imports a driver header. This keeps the dependency arrows pointing one way:
 
 ```
-open_gopro_http  ──┐
+open_gopro_ble   ──┐
 gopro_wifi_rc    ──┼──► camera_manager
 can_manager      ──┘
 ```
@@ -112,15 +111,19 @@ camera_manager_set_model(slot, model)
 camera_manager_on_ble_connected(slot, conn_handle)  → CAM_BLE_CONNECTED
 camera_manager_on_ble_ready(slot)                   → CAM_BLE_READY
 
-camera_manager_set_camera_ready(slot, true)          → WIFI_CAM_CONNECTED
-  (open_gopro_ble calls this; driver probe follows separately)
+camera_manager_on_camera_ready(slot)                 → WIFI_CAM_READY + start mismatch timer
+  (called by the driver after its readiness sequence completes —
+   for BLE-control: GetHardwareInfo + SetCameraControlStatus;
+   for RC-emulation: HTTP probe success.)
 
-camera_manager_on_wifi_connected(slot, ip)           → WIFI_CAM_READY + start mismatch timer
 camera_manager_on_wifi_disconnected(slot)            → WIFI_CAM_NONE  + stop mismatch timer
+  (RC-emulation only — BLE-control cameras use BLE link supervision instead.)
 
 camera_manager_remove_slot(slot)
   → stop timer, teardown driver, erase NVS, compact slot array, notify drivers of new indices
 ```
+
+The `WIFI_CAM_READY` enum name is retained for both transports — historical from when only RC-emulation existed. For BLE-control cameras it simply means "ready for recording commands".
 
 ---
 
@@ -162,7 +165,7 @@ int camera_manager_find_by_mac(const uint8_t mac[6]);
 
 Linear search of configured slots by raw 6-byte MAC. Returns slot index or `-1`. Used by both WiFi callbacks (station MAC) and BLE callbacks (BLE address bytes).
 
-A slot matches if the input equals **either** the slot's `mac` (BLE peer MAC, set at registration) **or** its `wifi_mac` (WiFi-side MAC, learned from the COHN status response). GoPro cameras run BLE and WiFi on separate radios with distinct MACs, so a single field would only match one of the two callback families.
+For BLE-control cameras the stored `mac` is the BLE peer MAC; for RC-emulation cameras it is the WiFi MAC (Hero 4 has no BLE radio). The two families don't overlap, so a single field is sufficient.
 
 ```c
 int camera_manager_register_new(const uint8_t mac[6]);
@@ -189,29 +192,26 @@ void camera_manager_on_ble_disconnected_by_handle(uint16_t conn_handle);
 ```c
 void camera_manager_set_model(int slot, camera_model_t model);
 void camera_manager_set_name(int slot, const char *name);
-void camera_manager_set_camera_ready(int slot, bool ready);
-void camera_manager_on_cohn_provisioned(int slot,
-                                         const uint8_t wifi_mac[6],
-                                         uint32_t ip);
 ```
-
-`set_camera_ready(true)` sets `WIFI_CAM_CONNECTED` (IP assigned; driver probe can proceed). It does **not** set `WIFI_CAM_READY` — that is done by the driver after its probe succeeds via `on_wifi_connected()`. Use this on the cached-credential path (NVS already has COHN creds and a `wifi_mac`/`last_ip`); if `last_ip` is non-zero it also dispatches `drv->on_wifi_associated` so the probe can fire even when the DHCP event arrived before the slot transitioned to `WIFI_CAM_CONNECTED`.
-
-`on_cohn_provisioned(slot, wifi_mac, ip)` is the fresh-provisioning equivalent: in one atomic operation it records `wifi_mac`, sets `last_ip`+`ip_addr` and flips `wifi_status` to `CONNECTED`, persists the slot to NVS (so future DHCP events can match the slot via `wifi_mac` even after a reboot), and dispatches `drv->on_wifi_associated`. `open_gopro_ble`'s COHN flow calls this once it has parsed `macaddress` (field 8) and `ipaddress` (field 5) out of `NotifyCOHNStatus`.
 
 ---
 
-### WiFi State
+### Camera-Ready Transition
 
 ```c
-void camera_manager_on_wifi_connected(int slot, uint32_t ip);
+void camera_manager_on_camera_ready(int slot);
 void camera_manager_on_wifi_disconnected(int slot);
 void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip);
 ```
 
-`on_wifi_connected` sets `WIFI_CAM_READY` and starts the mismatch poll timer.  
-`on_wifi_disconnected` stops the timer and resets `wifi_status` to `WIFI_CAM_NONE`.  
-`on_station_ip` updates `last_ip` for any configured slot whose `mac` or `wifi_mac` matches (called from the wifi_manager DHCP callback). If `wifi_status == WIFI_CAM_CONNECTED` at the time of the call, it also dispatches `drv->on_wifi_associated`. Be aware of the ordering: during first-time COHN provisioning, DHCP fires *before* the slot transitions to `CONNECTED` (CreateCert + status poll take a few seconds), so this path skips the driver dispatch — `on_cohn_provisioned` is what closes that gap.
+`on_camera_ready` sets `WIFI_CAM_READY` and starts the mismatch poll timer. Called by the driver after its own readiness sequence completes:
+
+- **BLE-control**: after `GetHardwareInfo` returns success and `SetCameraControlStatus(EXTERNAL)` is acked (or its 3 s timeout fires).
+- **RC-emulation**: after the HTTP probe to `/gp/gpControl/status` returns 200.
+
+`on_wifi_disconnected` stops the timer and resets `wifi_status` to `WIFI_CAM_NONE`. RC-emulation only — BLE-control cameras don't use the SoftAP, so connection loss surfaces as a BLE disconnect instead.
+
+`on_station_ip` updates `last_ip` and the `wifi_associated` flag for any configured slot whose `mac` matches (called from the wifi_manager DHCP callback). RC-emulation only.
 
 ---
 
@@ -290,10 +290,13 @@ struct camera_driver {
     camera_recording_status_t (*get_recording_status)(void *ctx); // non-blocking cache read
     void                      (*teardown)(void *ctx);              // nullable
     void                      (*update_slot_index)(void *ctx, int new_slot); // nullable
+    void                      (*on_wifi_disconnected)(void *ctx);  // nullable; RC-emulation only
 };
 ```
 
 `get_recording_status` must be non-blocking — it is called from the mismatch timer callback while the slot mutex is held.
+
+`on_wifi_disconnected` is set to `NULL` by the BLE-control driver since those cameras never associate to the SoftAP; the `gopro_wifi_rc` driver also leaves it `NULL` and tracks SoftAP station events through its own public API. The hook is retained for future drivers that may need it.
 
 ### `camera_slot_info_t`
 

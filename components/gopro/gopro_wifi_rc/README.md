@@ -106,7 +106,7 @@ on_station_dhcp(mac, ip)
 RC_CMD_PROBE (work task)
   → gopro_http_get("/gp/gpControl/status") × 3 attempts
   success       → set wifi_ready = true
-                → camera_manager_on_wifi_connected()
+                → camera_manager_on_camera_ready()
                 → rc_send_datetime()
   all fail      → log error; slot stays not-ready
 

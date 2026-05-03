@@ -32,15 +32,16 @@ An ESP32-S3 firmware that acts as a wireless RC controller for up to four GoPro 
   │ GATT writes │            │ station mgmt│
   └──────┬──────┘            └──────┬──────┘
          │                          │
-  ┌──────▼──────┐     ┌─────────────┼─────────────┐
-  │open_gopro_  │     │open_gopro_  │gopro_wifi_rc│
-  │    ble      │     │    http     │  (Hero4)    │
-  └──────┬──────┘     └──────┬──────┴──────┬──────┘
-         │                   │             │
-  ┌──────▼───────────────────▼─────────────▼──────┐
-  │                  camera_manager                 │
-  │      per-camera state, NVS slot records        │
-  └──────────────────────┬─────────────────────────┘
+  ┌──────▼──────┐            ┌──────▼──────┐
+  │open_gopro_  │            │gopro_wifi_rc│
+  │    ble      │            │  (Hero4)    │
+  │ (Hero 9+)   │            │             │
+  └──────┬──────┘            └──────┬──────┘
+         │                          │
+  ┌──────▼──────────────────────────▼──────┐
+  │             camera_manager              │
+  │    per-camera state, NVS slot records   │
+  └─────────────────┬───────────────────────┘
                          │
                   ┌──────▼──────┐
                   │ can_manager │
@@ -75,8 +76,7 @@ BLE and WiFi are pinned to opposite cores to minimize cache thrashing and radio 
 | [`ble_core`](components/ble_core/README.md) | NimBLE scan/connect/encrypt/notify/bond management |
 | [`camera_manager`](components/camera_manager) | Slot lifecycle, NVS records, driver vtable, mismatch correction |
 | [`gopro/gopro_model.h`](components/gopro/gopro_model.h) | GoPro model capability helpers |
-| [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Discovery, pairing, COHN provisioning, BLE keepalive |
-| [`open_gopro_http`](components/gopro/open_gopro_http) | Open GoPro HTTPS/COHN driver (Hero 9+) |
+| [`open_gopro_ble`](components/gopro/open_gopro_ble/README.md) | Discovery, pairing, BLE control driver for Hero 9+ (shutter, status poll, datetime, keepalive) |
 | [`gopro_wifi_rc`](components/gopro/gopro_wifi_rc/README.md) | RC-emulation driver over WiFi (Hero 4) |
 | [`can_manager`](components/can_manager/README.md) | TWAI node, 0x600/0x602 RX, 0x601 TX at 5 Hz, GPS UTC + cross-boot UTC persistence, manual UTC entry, timezone NVS |
 | [`http_server`](components/http_server) | esp_httpd instance, LittleFS web UI, all `/api/` endpoint handlers |
@@ -91,16 +91,15 @@ app_main()
  2. esp_netif_init()
  3. esp_event_loop_create_default()
  4. camera_manager_init()               // load NVS slot records
- 5. open_gopro_http_init()              // register COHN HTTPS driver (Hero 9+)
- 6. gopro_wifi_rc_init()                // register RC-emulation driver (Hero 4)
- 7. open_gopro_ble_init()               // register BLE callbacks + purge bonds
- 8. ble_core_init()                     // starts NimBLE host task; on_sync fires async
- 9. can_manager_register_callbacks(...) // wire on_utc_acquired → sync_time_all (BLE+RC)
-10. can_manager_init()                  // start TWAI node, RX task, TX timer, watchdog
-11. wifi_manager_set_callbacks(...)     // wire station-associated/DHCP/disconnected CBs
-12. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
-13. wifi_manager_wait_for_ap_ready()    // Block until beacon is on-air
-14. http_server_init()                  // Mount LittleFS, start esp_httpd, register /api/ handlers
+ 5. gopro_wifi_rc_init()                // register RC-emulation driver (Hero 4)
+ 6. open_gopro_ble_init()               // register BLE callbacks + BLE-control driver (Hero 9+)
+ 7. ble_core_init()                     // starts NimBLE host task; on_sync fires async
+ 8. can_manager_register_callbacks(...) // wire on_utc_acquired → sync_time_all (BLE+RC)
+ 9. can_manager_init()                  // start TWAI node, RX task, TX timer, watchdog
+10. wifi_manager_set_callbacks(...)     // wire station-associated/DHCP/disconnected CBs
+11. wifi_manager_init()                 // Raise SoftAP (after all station CBs wired)
+12. wifi_manager_wait_for_ap_ready()    // Block until beacon is on-air
+13. http_server_init()                  // Mount LittleFS, start esp_httpd, register /api/ handlers
 ```
 
 `ble_core_init()` and `wifi_manager_init()` overlap intentionally: NimBLE stack startup is asynchronous, so the AP can be raised while the BLE host is coming up. `http_server_init()` comes last because it depends on all other components being fully initialised.
@@ -157,7 +156,7 @@ Project defaults live in [`sdkconfig.defaults`](sdkconfig.defaults). Key setting
 | `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU` | `517` | GoPro responses up to ~88 bytes |
 | `CONFIG_BT_NIMBLE_NVS_PERSIST` | `y` | Bond storage survives reboot |
 | `CONFIG_LWIP_DHCPS_MAX_STATION_NUM` | `8` | DHCP pool headroom |
-| `CONFIG_LWIP_MAX_SOCKETS` | `25` | 16 httpd + 3 internal + 2 UDP (RC) + 4 TLS (COHN) |
+| `CONFIG_LWIP_MAX_SOCKETS` | `25` | 16 httpd + 3 internal + 2 UDP (RC) + headroom |
 
 ---
 
