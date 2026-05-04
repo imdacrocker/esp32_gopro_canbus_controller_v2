@@ -180,12 +180,12 @@ static void do_start_discovery(struct ble_npl_event *ev)
     ble_gap_disc_cancel();
 
     struct ble_gap_disc_params params = {
-        .itvl              = 0,
-        .window            = 0,
+        .itvl   = 0x0140,   // 320 * 0.625ms = 200 ms scan interval
+        .window = 0x0030,   //  48 * 0.625ms =  30 ms scan window  → 15% duty
         .filter_policy     = 0,   /* must see unpaired cameras */
         .limited           = 0,
         .passive           = 1,
-        .filter_duplicates = 0,
+        .filter_duplicates = 1,
     };
 
     int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, timeout_ms, &params,
