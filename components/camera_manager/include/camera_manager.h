@@ -34,10 +34,29 @@ typedef struct {
     bool              is_configured;
     cam_ble_status_t  ble_status;
     wifi_cam_status_t wifi_status;
-    bool              is_recording;        /* wifi_status==READY && driver reports ACTIVE */
+    /* Driver reports ACTIVE.  Gated on wifi_status==READY internally so the
+     * value only goes true when the camera is fully ready, regardless of
+     * transport (BLE drivers also flip wifi_status to READY at the end of
+     * their readiness sequence). */
+    bool              is_recording;
     desired_recording_t desired_recording;
     uint32_t          ip_addr;             /* 0 when not connected */
+    /* True after the camera has completed its readiness sequence at least
+     * once (or, for RC-emulation cameras, immediately after registration).
+     * Persisted in NVS.  Used by the web UI to distinguish "Pairing" (first-
+     * time setup, false) from "Connecting" (subsequent reconnect, true). */
+    bool              first_pair_complete;
 } camera_slot_info_t;
+
+/* ---- Pair-attempt info exposed via /api/pair/status ---- */
+typedef struct {
+    pair_attempt_state_t  state;
+    uint8_t               addr[6];
+    uint8_t               addr_type;
+    camera_model_t        model;          /* CAMERA_MODEL_UNKNOWN until known */
+    pair_attempt_error_t  error_code;
+    char                  error_message[64];
+} pair_attempt_info_t;
 
 /* ---- CAN camera state (§14.2) ---- */
 typedef enum {
@@ -185,3 +204,61 @@ esp_err_t camera_manager_reorder_slots(const int *new_order, int count);
  */
 bool camera_manager_is_known_ble_addr(ble_addr_t addr);
 bool camera_manager_has_disconnected_cameras(void);
+
+/* ----- First-pair tracking ----------------------------------------------- *
+ *
+ * Sets first_pair_complete = true on the slot and persists to NVS.  Idempotent
+ * (cheap re-save).  Called by the BLE driver at the end of the readiness
+ * sequence, and immediately after registration by the RC-emulation driver
+ * (which has no multi-step handshake).
+ */
+esp_err_t camera_manager_mark_first_pair_complete(int slot);
+
+/* ==========================================================================
+ * Pair-attempt state machine (BLE add-camera flow)
+ *
+ * Tracks a single in-flight initial-pair attempt.  Reconnects do NOT use this
+ * machine — it exists purely for surfacing per-step status and errors during
+ * the user-initiated add-camera flow.  Sticky terminal states: once the state
+ * reaches SUCCESS or FAILED, it remains there until the next pair_attempt_begin
+ * call clears it.
+ * ========================================================================== */
+
+/* Begin a new pair attempt.
+ *
+ * Returns ESP_OK on success.  Returns ESP_ERR_INVALID_STATE if a non-terminal
+ * attempt is already in flight (caller should respond with HTTP 409). */
+esp_err_t pair_attempt_begin(const uint8_t addr[6], uint8_t addr_type);
+
+/* Driver-side transitions.  All forward-only and idempotent — calling
+ * advance() with the current or an earlier state is a no-op.  fail() only
+ * sets FAILED if the current state is non-terminal, so a real cause set
+ * before an inevitable BLE-disconnect cleanup is preserved. */
+void pair_attempt_advance(pair_attempt_state_t new_state);
+void pair_attempt_fail(pair_attempt_error_t err, const char *message);
+
+/* Record the model number once it has been read from the camera. */
+void pair_attempt_set_model(camera_model_t model);
+
+/* Snapshot the current state for the web UI. */
+void pair_attempt_get(pair_attempt_info_t *out);
+
+/* True if a non-terminal attempt is currently in flight. */
+bool pair_attempt_in_flight(void);
+
+/* Record the BLE connection handle once L2 is up.  Called from the BLE
+ * driver's on_connected callback when the address matches the in-flight
+ * pair attempt.  Used by pair_attempt_cancel() to terminate the link. */
+void pair_attempt_set_conn_handle(uint16_t conn_handle);
+
+/* Abort an in-flight pair attempt:
+ *   - Sets state = FAILED, error_code = CANCELLED (so any racing
+ *     advance(SUCCESS) from the BLE thread becomes a no-op).
+ *   - Calls ble_gap_conn_cancel() to abort an in-flight connect.
+ *   - If a conn_handle was recorded, calls ble_gap_terminate() on it.
+ *   - If a slot was registered during PROVISIONING and never reached
+ *     first_pair_complete, removes it from camera_manager.
+ *
+ * Returns ESP_OK if a cancel was issued, ESP_ERR_INVALID_STATE if no
+ * non-terminal attempt was in flight. */
+esp_err_t pair_attempt_cancel(void);

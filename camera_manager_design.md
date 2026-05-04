@@ -469,11 +469,49 @@ typedef struct {
     desired_recording_t   desired_recording;
     uint32_t              ip_addr;          /* 0 when not connected */
 
+    /* Pair-flow tracking (persisted in NVS) */
+    bool                  first_pair_complete;
+
     /* Future additions: battery_pct, storage_remaining_mb, temperature, etc. */
 } camera_slot_info_t;
 ```
 
 `is_recording` is derived from `wifi_status == WIFI_CAM_READY && driver->get_recording_status() == CAMERA_RECORDING_ACTIVE`. `desired_recording` is exposed so the web UI can show whether the operator intends the camera to be recording, which may differ from its actual state during a transition.
+
+`first_pair_complete` is set to `true` after the camera completes its readiness sequence at least once (BLE drivers call `camera_manager_mark_first_pair_complete()` from `complete_connection_sequence()`; RC-emulation drivers call it immediately after `camera_manager_register_new()` since they have no multi-step handshake). Persisted in NVS. Used by the web UI to distinguish "Pairing" (initial add-camera flow, false) from "Connecting" (subsequent reconnects, true) for BLE cameras. Adding this field bumped `CAMERA_NV_SCHEMA_VERSION` from 1 to 2 — flash must be erased on first boot after upgrade.
+
+### 9.1 Pair-attempt state machine
+
+Single in-RAM state machine in `pair_attempt.c` tracks the user-initiated BLE add-camera flow and surfaces errors that prevent a camera from being remembered. Reconnects do not use this machine.
+
+```c
+typedef enum {
+    PAIR_ATTEMPT_IDLE,          /* No attempt has been started */
+    PAIR_ATTEMPT_CONNECTING,    /* BLE L2 connect in flight */
+    PAIR_ATTEMPT_BONDING,       /* L2 up, waiting for encrypted bond */
+    PAIR_ATTEMPT_PROVISIONING,  /* Slot registered, readiness sequence running */
+    PAIR_ATTEMPT_SUCCESS,       /* Slot persisted; camera ready */
+    PAIR_ATTEMPT_FAILED,        /* error_code + error_message valid */
+} pair_attempt_state_t;
+```
+
+Error codes (`pair_attempt_error_t`): `NONE`, `SLOTS_FULL`, `BLE_CONNECT_FAILED`, `BOND_FAILED`, `HWINFO_TIMEOUT`, `MODEL_UNSUPPORTED`, `HANDSHAKE_TIMEOUT`, `DISCONNECTED`, `CANCELLED`, `INTERNAL`.
+
+**Sticky terminal states:** SUCCESS and FAILED remain set until the next `pair_attempt_begin()` clears them. Avoids polling races where the UI could miss the result.
+
+**Forward-only transitions:** `pair_attempt_advance(state)` ignores any state at or behind the current state. `pair_attempt_fail(err, msg)` ignores calls when state is already terminal — the first specific cause wins (e.g. `HWINFO_TIMEOUT` raised before the inevitable `BLE_DISCONNECT` cleanup).
+
+**Wiring** (in `open_gopro_ble`):
+- `gopro_on_connected` → `advance(BONDING)` if addr matches the in-flight attempt.
+- `gopro_on_encrypted` → `advance(PROVISIONING)` after `register_new` succeeds; `fail(SLOTS_FULL)` if not.
+- `gopro_on_hw_info_ok` frozen-model branch → `fail(MODEL_UNSUPPORTED)` before terminating.
+- `on_readiness_timer` exhaustion → `fail(HWINFO_TIMEOUT)` before terminating.
+- `complete_connection_sequence` → `mark_first_pair_complete(slot)` then `advance(SUCCESS)`.
+- `gopro_on_disconnected` → `fail(DISCONNECTED)` if addr matches and state is non-terminal (no-op if a more specific cause is already set).
+
+### 9.2 BLE-disconnect status reset
+
+When a BLE-control camera disconnects, `camera_manager_on_ble_disconnected_by_handle()` resets both `ble_status` to `CAM_BLE_NONE` *and* `wifi_status` to `WIFI_CAM_NONE` (the latter only for slots with `requires_ble == true`). The `wifi_status` reset is necessary because BLE drivers overload the field as the universal "fully ready" flag — without the reset, `is_recording` derivation and the UI status mapping would see stale values after the connection drops. The mismatch poll timer is also stopped if it was armed.
 
 ---
 

@@ -123,6 +123,11 @@ static void complete_connection_sequence(gopro_ble_ctx_t *ctx)
     ESP_LOGI(TAG, "slot %d: camera ready — completing connection sequence", slot);
 
     camera_manager_on_camera_ready(slot);
+    /* First successful readiness completion stamps first_pair_complete=true
+     * in NVS so future reconnects render as "Connecting" instead of
+     * "Pairing".  Idempotent — cheap re-save when already set. */
+    camera_manager_mark_first_pair_complete(slot);
+    pair_attempt_advance(PAIR_ATTEMPT_SUCCESS);
 
     /* Date/time best-effort — gopro_control_set_datetime() returns silently
      * when UTC is not session-synced.  If deferred, the flag will trigger a
@@ -304,10 +309,15 @@ static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
     /* Frozen models are recognised but intentionally unsupported — drop the
      * BLE connection and remove the slot before any further setup runs.  The
      * disconnect callback will clean up driver state asynchronously; the
-     * slot removal here erases NVS and frees the camera_manager entry. */
+     * slot removal here erases NVS and frees the camera_manager entry.
+     * Fail the pair attempt BEFORE terminating so the disconnect handler's
+     * generic DISCONNECTED reason can't overwrite the more specific cause. */
     if (gopro_model_is_frozen(model)) {
         ESP_LOGW(TAG, "slot %d: model %u is frozen — disconnecting and removing camera",
                  slot, (unsigned)model_num);
+        pair_attempt_set_model(model);
+        pair_attempt_fail(PAIR_ERROR_MODEL_UNSUPPORTED,
+                          "Camera model is not supported");
         if (ctx->conn_handle != GOPRO_CONN_NONE) {
             ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
@@ -316,6 +326,7 @@ static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
     }
 
     camera_manager_set_model(slot, model);
+    pair_attempt_set_model(model);
     esp_err_t save_err = camera_manager_save_slot(slot);
     if (save_err != ESP_OK) {
         ESP_LOGW(TAG, "slot %d: NVS save after pairing failed: %s",
@@ -397,6 +408,10 @@ static void on_readiness_timer(void *arg)
     if (ctx->readiness_retry_count > GOPRO_READINESS_RETRY_MAX) {
         ESP_LOGW(TAG, "slot %d: readiness timeout, disconnecting", ctx->slot);
         ctx->readiness_polling = false;
+        /* Fail the pair attempt with a specific cause before the disconnect
+         * callback overwrites it with the generic DISCONNECTED reason. */
+        pair_attempt_fail(PAIR_ERROR_HWINFO_TIMEOUT,
+                          "Camera did not respond in time");
         ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return;
     }

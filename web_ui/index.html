@@ -130,6 +130,18 @@
   </div>
 </div>
 
+<!-- Pairing-in-progress modal (bottom sheet, blocks all interaction).
+     Hidden by default via the `hidden` attribute so the element stays
+     invisible even if style.css is cached/stale; JS toggles it. -->
+<div class="pair-overlay" id="pair-overlay" hidden aria-hidden="true">
+  <div class="pair-sheet" role="dialog" aria-labelledby="pair-sheet-title">
+    <div class="pair-sheet-title" id="pair-sheet-title">Pairing Camera</div>
+    <div class="pair-throbber" id="pair-throbber"></div>
+    <div class="pair-status" id="pair-status">Connecting…</div>
+    <button class="pair-cancel-btn" id="pair-cancel-btn">Cancel</button>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

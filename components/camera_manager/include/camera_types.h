@@ -68,6 +68,29 @@ typedef enum {
     MISMATCH_ACTION_STOP  = 2,
 } mismatch_action_t;
 
+/* ---- Pair-attempt state machine (BLE add-camera flow) ---- */
+typedef enum {
+    PAIR_ATTEMPT_IDLE = 0,        /* No attempt has been started */
+    PAIR_ATTEMPT_CONNECTING,      /* BLE L2 connect in flight */
+    PAIR_ATTEMPT_BONDING,         /* L2 up, waiting for encrypted bond */
+    PAIR_ATTEMPT_PROVISIONING,    /* Slot registered, readiness sequence running */
+    PAIR_ATTEMPT_SUCCESS,         /* Slot persisted; camera ready */
+    PAIR_ATTEMPT_FAILED,          /* error_code + error_message valid */
+} pair_attempt_state_t;
+
+typedef enum {
+    PAIR_ERROR_NONE = 0,
+    PAIR_ERROR_SLOTS_FULL,         /* CAMERA_MAX_SLOTS reached */
+    PAIR_ERROR_BLE_CONNECT_FAILED, /* ble_gap_connect failed / timed out */
+    PAIR_ERROR_BOND_FAILED,        /* encryption / bond rejected */
+    PAIR_ERROR_HWINFO_TIMEOUT,     /* GetHardwareInfo retry budget exhausted */
+    PAIR_ERROR_MODEL_UNSUPPORTED,  /* Frozen / unsupported model */
+    PAIR_ERROR_HANDSHAKE_TIMEOUT,  /* SetThirdPartyClient/SetCameraControlStatus failed */
+    PAIR_ERROR_DISCONNECTED,       /* BLE dropped before reaching READY */
+    PAIR_ERROR_CANCELLED,          /* POST /api/pair/cancel */
+    PAIR_ERROR_INTERNAL,           /* Catch-all */
+} pair_attempt_error_t;
+
 /*
  * Pure mismatch step function — no side effects, no platform dependencies.
  * Exported here so mismatch.c can be compiled for host-side unit tests

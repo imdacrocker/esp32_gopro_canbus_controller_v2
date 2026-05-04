@@ -10,8 +10,13 @@
 
 static const char *TAG = "camera_manager";
 
-/* ---- NVS layout (§6.1) ---- */
-#define CAMERA_NV_SCHEMA_VERSION  1
+/* ---- NVS layout (§6.1) ----
+ *
+ * Schema version 2 added the `first_pair_complete` field at the end of the
+ * record.  Bumping the version invalidates v1 records on first boot after
+ * upgrade — flash must be erased.
+ */
+#define CAMERA_NV_SCHEMA_VERSION  2
 #define NVS_KEY_CAMERA            "camera"
 
 /* Mismatch poll interval (§13.3 default; per-model tuning deferred) */
@@ -33,6 +38,7 @@ typedef struct {
     uint8_t        mac[6];
     uint32_t       last_ip;
     bool           is_configured;
+    bool           first_pair_complete;
 } camera_nv_record_t;
 
 /* Internal per-slot state */
@@ -44,6 +50,7 @@ typedef struct {
                                           WiFi MAC for RC-emulation cameras */
     uint32_t          last_ip;
     bool              is_configured;
+    bool              first_pair_complete;
 
     /* BLE (§7.2) */
     cam_ble_status_t  ble_status;
@@ -250,17 +257,39 @@ void camera_manager_on_ble_ready(int slot)
 
 void camera_manager_on_ble_disconnected_by_handle(uint16_t conn_handle)
 {
+    int found = -1;
+    bool was_ready = false;
+
     lock();
     for (int i = 0; i < s_slot_count; i++) {
         if (s_slots[i].ble_handle == conn_handle) {
             s_slots[i].ble_handle = BLE_HS_CONN_HANDLE_NONE;
             s_slots[i].ble_status = CAM_BLE_NONE;
-            unlock();
-            ESP_LOGI(TAG, "slot %d: BLE disconnected", i);
-            return;
+
+            /* For BLE-control cameras, wifi_status is overloaded as the
+             * universal "fully ready" flag (set by the driver's readiness
+             * sequence).  Clear it on disconnect so is_recording derivation
+             * and the UI status mapping see the camera as no-longer-ready. */
+            if (s_slots[i].requires_ble) {
+                was_ready = (s_slots[i].wifi_status == WIFI_CAM_READY);
+                s_slots[i].wifi_status         = WIFI_CAM_NONE;
+                s_slots[i].grace_period_active = false;
+            }
+            found = i;
+            break;
         }
     }
     unlock();
+
+    if (found < 0) return;
+
+    /* Stop the mismatch poll timer if it was armed (it's started inside
+     * on_camera_ready, which is what set wifi_status=READY for BLE slots). */
+    if (was_ready) {
+        stop_poll_timer(found);
+    }
+
+    ESP_LOGI(TAG, "slot %d: BLE disconnected", found);
 }
 
 /* ================================================================
@@ -402,12 +431,13 @@ static esp_err_t load_slot_from_nvs(int slot)
     camera_slot_t *sl = &s_slots[slot];
     strncpy(sl->name, rec.name, sizeof(sl->name) - 1);
     sl->name[sizeof(sl->name) - 1] = '\0';
-    sl->model         = rec.model;
+    sl->model               = rec.model;
     memcpy(sl->mac, rec.mac, 6);
-    sl->last_ip       = rec.last_ip;
-    sl->is_configured = rec.is_configured;
-    sl->ble_handle    = BLE_HS_CONN_HANDLE_NONE;
-    sl->desired_recording = DESIRED_RECORDING_UNKNOWN;
+    sl->last_ip             = rec.last_ip;
+    sl->is_configured       = rec.is_configured;
+    sl->first_pair_complete = rec.first_pair_complete;
+    sl->ble_handle          = BLE_HS_CONN_HANDLE_NONE;
+    sl->desired_recording   = DESIRED_RECORDING_UNKNOWN;
 
     return ESP_OK;
 }
@@ -423,10 +453,11 @@ static esp_err_t save_slot_to_nvs(int slot)
 
     camera_slot_t *sl = &s_slots[slot];
     camera_nv_record_t rec = {
-        .version      = CAMERA_NV_SCHEMA_VERSION,
-        .model        = sl->model,
-        .last_ip      = sl->last_ip,
-        .is_configured = sl->is_configured,
+        .version             = CAMERA_NV_SCHEMA_VERSION,
+        .model               = sl->model,
+        .last_ip             = sl->last_ip,
+        .is_configured       = sl->is_configured,
+        .first_pair_complete = sl->first_pair_complete,
     };
     strncpy(rec.name, sl->name, sizeof(rec.name) - 1);
     memcpy(rec.mac, sl->mac, 6);
@@ -450,6 +481,31 @@ esp_err_t camera_manager_save_slot(int slot)
     unlock();
     if (err != ESP_OK)
         ESP_LOGE(TAG, "slot %d: NVS save failed: %s", slot, esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t camera_manager_mark_first_pair_complete(int slot)
+{
+    if (!slot_valid(slot)) return ESP_ERR_INVALID_ARG;
+    lock();
+    if (s_slots[slot].model == CAMERA_MODEL_UNKNOWN) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_slots[slot].first_pair_complete) {
+        unlock();
+        return ESP_OK;  /* already set, no NVS write needed */
+    }
+    s_slots[slot].first_pair_complete = true;
+    esp_err_t err = save_slot_to_nvs(slot);
+    unlock();
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "slot %d: first_pair_complete set", slot);
+    } else {
+        ESP_LOGW(TAG, "slot %d: first_pair_complete save failed: %s",
+                 slot, esp_err_to_name(err));
+    }
     return err;
 }
 
@@ -486,13 +542,14 @@ esp_err_t camera_manager_get_slot_info(int slot, camera_slot_info_t *out)
 
     lock();
     camera_slot_t *sl = &s_slots[slot];
-    out->index             = slot;
-    out->model             = sl->model;
-    out->is_configured     = sl->is_configured;
-    out->ble_status        = sl->ble_status;
-    out->wifi_status       = sl->wifi_status;
-    out->ip_addr           = sl->ip_addr;
-    out->desired_recording = sl->desired_recording;
+    out->index               = slot;
+    out->model               = sl->model;
+    out->is_configured       = sl->is_configured;
+    out->ble_status          = sl->ble_status;
+    out->wifi_status         = sl->wifi_status;
+    out->ip_addr             = sl->ip_addr;
+    out->desired_recording   = sl->desired_recording;
+    out->first_pair_complete = sl->first_pair_complete;
     memcpy(out->mac, sl->mac, 6);
     strncpy(out->name, sl->name, sizeof(out->name) - 1);
     out->name[sizeof(out->name) - 1] = '\0';

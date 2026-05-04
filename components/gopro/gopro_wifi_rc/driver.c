@@ -215,6 +215,13 @@ void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip)
     ctx->last_ip = ip;
     memcpy(ctx->mac, mac, 6);
     camera_manager_save_slot(slot);
+    /* RC-emulation cameras have no multi-step pairing handshake — the user
+     * picks them from the unmanaged-stations list and they're remembered
+     * immediately.  Mark first_pair_complete so the WiFi status mapping
+     * stays semantically clean (the field is used by BLE for the
+     * Pairing/Connecting split, but RC slots may be exposed via the same
+     * info struct). */
+    camera_manager_mark_first_pair_complete(slot);
 
     rc_arm_keepalive_timer(ctx);
 

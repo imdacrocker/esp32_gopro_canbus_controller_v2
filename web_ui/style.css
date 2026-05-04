@@ -374,11 +374,20 @@ button {
 .status-badge.disconnected .status-dot { display: none; }
 .status-badge.disconnected             { color: var(--gray-light); }
 
-.status-badge.connected .status-dot    { background: var(--blue); }
-.status-badge.connected                { color: var(--blue); }
+.status-badge.pairing .status-dot {
+  background: var(--blue);
+  animation: cam-pulse 1.2s infinite;
+}
+.status-badge.pairing                  { color: var(--blue); }
 
-.status-badge.not-recording .status-dot { background: var(--orange); }
-.status-badge.not-recording             { color: var(--orange); }
+.status-badge.connecting .status-dot {
+  background: var(--blue);
+  animation: cam-pulse 1.2s infinite;
+}
+.status-badge.connecting               { color: var(--blue); }
+
+.status-badge.idle .status-dot         { background: var(--orange); }
+.status-badge.idle                     { color: var(--orange); }
 
 .status-badge.recording .status-dot {
   background: var(--green);
@@ -724,4 +733,107 @@ button {
   font-size: 0.88rem;
   color: var(--gray-text);
   padding: 8px 16px 4px;
+}
+
+/* ---- Pair-in-progress modal (bottom sheet) ------------------------------ */
+
+@keyframes pair-sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0);    }
+}
+
+.pair-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  z-index: 1000;            /* above manage-cameras modal (200) */
+  align-items: flex-end;    /* stick to bottom like manage modal */
+  justify-content: center;
+}
+
+.pair-overlay.open { display: flex; }
+
+.pair-sheet {
+  background: var(--modal-bg);
+  border-radius: 12px 12px 0 0;
+  width: 100%;
+  max-width: 480px;
+  padding: 28px 24px 32px;
+  text-align: center;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.15);
+  animation: pair-sheet-up 0.22s ease-out;
+}
+
+.pair-sheet-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 28px;
+  color: var(--text-primary);
+}
+
+/* Throbber: 72px ring with one accent arc that spins.  In success / failure
+ * states the JS swaps in a checkmark / X glyph and the spin animation is
+ * paused via the modifier classes below. */
+.pair-throbber {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 22px;
+  border: 6px solid var(--gray-border-light);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.2rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.pair-throbber.success {
+  border: 6px solid var(--green);
+  border-top-color: var(--green);
+  animation: none;
+  color: var(--green);
+}
+.pair-throbber.success::before { content: "✓"; }
+
+.pair-throbber.failed {
+  border: 6px solid var(--red);
+  border-top-color: var(--red);
+  animation: none;
+  color: var(--red);
+}
+.pair-throbber.failed::before { content: "✕"; }
+
+.pair-status {
+  font-size: 1rem;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+  min-height: 2.6em;        /* reserve space so layout doesn't jump */
+  line-height: 1.35;
+  padding: 0 8px;
+}
+
+.pair-cancel-btn {
+  width: 100%;
+  max-width: 320px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 14px 18px;
+  min-height: 48px;
+  border-radius: 8px;
+  background: var(--gray-disabled);
+  color: var(--text-primary);
+  border: 0;
+  cursor: pointer;
+}
+
+.pair-cancel-btn:hover:not(:disabled) { background: var(--gray-toggle-off); }
+
+.pair-cancel-btn:disabled {
+  background: var(--gray-disabled);
+  color: var(--gray-disabled-text);
+  cursor: default;
 }

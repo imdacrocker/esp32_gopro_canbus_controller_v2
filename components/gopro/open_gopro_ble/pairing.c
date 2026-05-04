@@ -40,12 +40,32 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
     return 0;
 }
 
+/* True if the in-flight pair attempt targets this address. */
+static bool pair_attempt_addr_matches(const uint8_t addr[6])
+{
+    pair_attempt_info_t info;
+    pair_attempt_get(&info);
+    if (info.state == PAIR_ATTEMPT_IDLE) return false;
+    if (info.state == PAIR_ATTEMPT_SUCCESS || info.state == PAIR_ATTEMPT_FAILED) {
+        return false;
+    }
+    return memcmp(info.addr, addr, 6) == 0;
+}
+
 /* ---- on_connected -------------------------------------------------------- */
 
 void gopro_on_connected(uint16_t conn_handle, ble_addr_t addr)
 {
-    /* ble_core has already called ble_gap_security_initiate() for us.
-     * Look up whether this is a known camera — if so, record conn_handle. */
+    /* L2 is up; ble_core has already kicked off ble_gap_security_initiate().
+     * If this is the camera the user is currently pairing, record the
+     * conn_handle so cancel() can terminate the link and advance the state
+     * machine.  Reconnects (known camera, no in-flight attempt) are
+     * unaffected. */
+    if (pair_attempt_addr_matches(addr.val)) {
+        pair_attempt_set_conn_handle(conn_handle);
+        pair_attempt_advance(PAIR_ATTEMPT_BONDING);
+    }
+
     int slot = camera_manager_find_by_mac(addr.val);
     if (slot < 0) {
         /* Unknown camera — will be registered in on_encrypted once bonded. */
@@ -68,6 +88,7 @@ void gopro_on_connected(uint16_t conn_handle, ble_addr_t addr)
 
 void gopro_on_encrypted(uint16_t conn_handle, ble_addr_t addr)
 {
+    bool is_active_pair = pair_attempt_addr_matches(addr.val);
     int slot = camera_manager_find_by_mac(addr.val);
 
     if (slot < 0) {
@@ -76,10 +97,18 @@ void gopro_on_encrypted(uint16_t conn_handle, ble_addr_t addr)
         if (slot < 0) {
             ESP_LOGW(TAG, "no free slots for new camera, disconnecting conn=%d",
                      conn_handle);
+            if (is_active_pair) {
+                pair_attempt_fail(PAIR_ERROR_SLOTS_FULL,
+                                  "All camera slots in use");
+            }
             ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             return;
         }
         ESP_LOGI(TAG, "registered new camera in slot %d conn=%d", slot, conn_handle);
+    }
+
+    if (is_active_pair) {
+        pair_attempt_advance(PAIR_ATTEMPT_PROVISIONING);
     }
 
     gopro_ble_ctx_t *ctx = gopro_ctx_by_slot(slot);
@@ -116,6 +145,15 @@ void gopro_on_encrypted(uint16_t conn_handle, ble_addr_t addr)
 void gopro_on_disconnected(uint16_t conn_handle, ble_addr_t addr,
                             uint8_t reason)
 {
+    /* If a pair attempt is in flight for this address and hasn't already
+     * been failed with a more specific cause (handshake/hwinfo timeout etc.),
+     * record the disconnect.  pair_attempt_fail is a no-op when state is
+     * already terminal, so the first cause wins. */
+    if (pair_attempt_addr_matches(addr.val)) {
+        pair_attempt_fail(PAIR_ERROR_DISCONNECTED,
+                          "Camera disconnected during pairing");
+    }
+
     gopro_ble_ctx_t *ctx = gopro_ctx_by_conn(conn_handle);
     if (!ctx) {
         return;

@@ -87,19 +87,15 @@ document.getElementById('toggle-wrap').addEventListener('click', () => {
 let lastCameraList = [];
 
 const STATUS_LABEL = {
-    disconnected:  'Not Connected',
-    connected:     'Connected',
-    not_recording: 'Not Recording',
-    recording:     'Recording',
+    disconnected: 'Not Connected',
+    pairing:      'Pairing…',
+    connecting:   'Connecting…',
+    idle:         'Idle',
+    recording:    'Recording',
 };
 
-function statusBadgeClass(status) {
-    return status === 'not_recording' ? 'not-recording' : status;
-}
-
 function makeBadge(status) {
-    const cls = statusBadgeClass(status);
-    return `<div class="status-badge ${cls}">
+    return `<div class="status-badge ${status}">
         <span class="status-dot"></span>
         <span>${STATUS_LABEL[status] || status}</span>
     </div>`;
@@ -107,7 +103,7 @@ function makeBadge(status) {
 
 function makeShutterBtn(cam) {
     if (autoControlEnabled) return '';
-    if (cam.status !== 'not_recording' && cam.status !== 'recording') return '';
+    if (cam.status !== 'idle' && cam.status !== 'recording') return '';
     const isRec = cam.status === 'recording';
     const lock  = shutterLocked[cam.slot];
     const dis   = lock ? 'disabled' : '';
@@ -198,7 +194,7 @@ document.getElementById('cam-status-list').addEventListener('click', e => {
     if (!btn || btn.disabled) return;
     const slot = parseInt(btn.dataset.slot);
     const on   = btn.dataset.on === 'true';
-    const expectedStatus = on ? 'recording' : 'not_recording';
+    const expectedStatus = on ? 'recording' : 'idle';
 
     btn.disabled = true;
     shutterLocked[slot] = {
@@ -357,6 +353,8 @@ function closeModal() {
     document.getElementById('modal-status').textContent = '';
     document.getElementById('results').innerHTML = '';
     modalOverlay.classList.remove('open');
+    /* Note: the pair-progress modal is a separate overlay with higher
+     * z-index and manages its own lifecycle. */
 }
 
 function setModalStatus(msg) {
@@ -484,11 +482,175 @@ document.getElementById('results').addEventListener('click', async e => {
     }
 
     document.getElementById('results').innerHTML = '';
-    setModalStatus('Pairing initiated — camera should appear in the list shortly.');
 
     // Cancel the BLE scan first, then pair — avoids 4 concurrent requests to the ESP32
     await apiFetch('POST', '/api/scan-cancel').catch(() => {});
-    apiFetch('POST', '/api/pair', { addr, addr_type }).catch(() => {});
+
+    openPairModal();
+    try {
+        await apiFetch('POST', '/api/pair', { addr, addr_type });
+    } catch (err) {
+        showPairModalFailure(err.message || 'Pair request failed.');
+        return;
+    }
+    startPairStatusPoll();
+});
+
+/* ---- Pair-progress modal ------------------------------------------------- */
+
+const pairOverlay   = document.getElementById('pair-overlay');
+const pairThrobber  = document.getElementById('pair-throbber');
+const pairStatusEl  = document.getElementById('pair-status');
+const pairCancelBtn = document.getElementById('pair-cancel-btn');
+
+let pairStatusTimer = null;
+let pairDismissTimer = null;
+let pairCancelInFlight = false;
+
+const PAIR_STATE_LABEL = {
+    connecting:   'Connecting to camera…',
+    bonding:      'Bonding…',
+    provisioning: 'Configuring camera…',
+};
+
+const PAIR_ERROR_LABEL = {
+    none:               '',
+    slots_full:         'All camera slots are in use. Remove a camera first.',
+    ble_connect_failed: 'Could not connect to the camera. Move it closer and try again.',
+    bond_failed:        'Bonding failed. Reset connections on the camera and retry.',
+    hwinfo_timeout:     'Camera did not respond. Check that it is powered on and in pairing mode.',
+    model_unsupported:  'This camera model is not supported.',
+    handshake_timeout:  'Camera setup timed out. Try again.',
+    disconnected:       'Camera disconnected during pairing.',
+    cancelled:          'Pairing cancelled.',
+    internal:           'Internal error during pairing.',
+};
+
+function openPairModal() {
+    /* Dismiss the Add/Manage modal first so the pair sheet is the only
+     * thing visible — on terminate, the home screen takes focus. */
+    if (modalOverlay.classList.contains('open')) {
+        closeModal();
+    }
+    pairCancelInFlight = false;
+    pairThrobber.className = 'pair-throbber';
+    pairStatusEl.textContent = 'Connecting to camera…';
+    pairCancelBtn.textContent = 'Cancel';
+    pairCancelBtn.disabled = false;
+    pairOverlay.hidden = false;
+    pairOverlay.setAttribute('aria-hidden', 'false');
+    pairOverlay.classList.add('open');
+}
+
+function closePairModal() {
+    pairOverlay.classList.remove('open');
+    pairOverlay.hidden = true;
+    pairOverlay.setAttribute('aria-hidden', 'true');
+    stopPairStatusPoll();
+    clearTimeout(pairDismissTimer);
+    pairDismissTimer = null;
+}
+
+function showPairModalFailure(message) {
+    stopPairStatusPoll();
+    pairThrobber.className = 'pair-throbber failed';
+    pairStatusEl.textContent = message;
+    pairCancelBtn.textContent = 'OK';
+    pairCancelBtn.disabled = false;
+    pairCancelInFlight = false;
+}
+
+function showPairModalSuccess() {
+    stopPairStatusPoll();
+    pairThrobber.className = 'pair-throbber success';
+    pairStatusEl.textContent = 'Success!';
+    pairCancelBtn.disabled = true;
+
+    /* Hold for 2s, then dismiss the pair sheet — manage modal is already
+     * closed (closed when the pair sheet opened), so the home screen takes
+     * focus directly. */
+    clearTimeout(pairDismissTimer);
+    pairDismissTimer = setTimeout(() => {
+        closePairModal();
+        refreshCameraStatus();
+    }, 2000);
+}
+
+function setPairProgress(state, modelName) {
+    let label = PAIR_STATE_LABEL[state] || 'Pairing…';
+    if (state === 'provisioning' && modelName && modelName !== 'Unknown') {
+        label = `Configuring camera (${modelName})…`;
+    }
+    pairStatusEl.textContent = label;
+}
+
+function startPairStatusPoll() {
+    clearInterval(pairStatusTimer);
+    pairStatusTimer = setInterval(pollPairStatus, 1000);
+    pollPairStatus();
+}
+
+function stopPairStatusPoll() {
+    clearInterval(pairStatusTimer);
+    pairStatusTimer = null;
+}
+
+function pollPairStatus() {
+    apiFetch('GET', '/api/pair/status')
+        .then(info => {
+            /* If the user already clicked Cancel, the local UI state takes
+             * precedence — don't let a late "connecting" poll overwrite the
+             * cancel feedback. */
+            if (pairCancelInFlight && info.state !== 'failed') return;
+
+            switch (info.state) {
+                case 'connecting':
+                case 'bonding':
+                case 'provisioning':
+                    setPairProgress(info.state, info.model_name);
+                    break;
+                case 'success':
+                    showPairModalSuccess();
+                    break;
+                case 'failed': {
+                    const label = PAIR_ERROR_LABEL[info.error_code]
+                        || info.error_message
+                        || 'Pairing failed.';
+                    showPairModalFailure(label);
+                    break;
+                }
+                case 'idle':
+                default:
+                    /* No attempt in flight (e.g. server forgot or never started). */
+                    stopPairStatusPoll();
+                    break;
+            }
+        })
+        .catch(() => {
+            /* Transient fetch failure — interval will retry. */
+        });
+}
+
+pairCancelBtn.addEventListener('click', () => {
+    /* Three roles for the same button:
+     *   - Active pairing: "Cancel" → server-side abort, then close modal
+     *     when the FAILED state arrives.
+     *   - Failure shown: "OK" → just close.
+     *   - Success shown: disabled (handled above). */
+    if (pairThrobber.classList.contains('failed')) {
+        closePairModal();
+        return;
+    }
+    if (pairThrobber.classList.contains('success')) {
+        return;  /* shouldn't happen — button is disabled */
+    }
+
+    pairCancelInFlight = true;
+    pairCancelBtn.disabled = true;
+    pairStatusEl.textContent = 'Cancelling…';
+    apiFetch('POST', '/api/pair/cancel', {}).catch(() => {});
+    /* Polling will pick up the FAILED+cancelled state and call
+     * showPairModalFailure(), which re-enables the button as "OK". */
 });
 
 /* ---- RC Emulation discovered --------------------------------------------- */

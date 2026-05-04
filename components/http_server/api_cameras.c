@@ -10,6 +10,8 @@
  *   POST /api/scan
  *   POST /api/scan-cancel
  *   POST /api/pair
+ *   GET  /api/pair/status
+ *   POST /api/pair/cancel
  */
 
 #include <stdio.h>
@@ -44,16 +46,71 @@ static const char *model_name_str(camera_model_t model)
     }
 }
 
+/*
+ * Status mapping mirrors camera_manager state (web_ui_spec §...).
+ *
+ * WiFi (RC-emulation) — three states:
+ *   disconnected — wifi_status != READY
+ *   idle         — wifi_status == READY, !is_recording
+ *   recording    — wifi_status == READY,  is_recording
+ *
+ * BLE — four states:
+ *   disconnected — ble_status == NONE
+ *   pairing      — ble_status != NONE, wifi_status != READY, !first_pair_complete
+ *   connecting   — ble_status != NONE, wifi_status != READY,  first_pair_complete
+ *   idle         — wifi_status == READY, !is_recording
+ *   recording    — wifi_status == READY,  is_recording
+ *
+ * BLE drivers also flip wifi_status to READY at the end of their readiness
+ * sequence, so the recording / idle branch is shared between transports.
+ */
 static const char *camera_status_str(const camera_slot_info_t *info)
 {
+    bool is_rc = gopro_model_uses_rc_emulation(info->model);
+
     if (info->wifi_status == WIFI_CAM_READY) {
-        return info->is_recording ? "recording" : "not_recording";
+        return info->is_recording ? "recording" : "idle";
     }
-    if (info->ble_status >= CAM_BLE_CONNECTED ||
-        info->wifi_status >= WIFI_CAM_CONNECTED) {
-        return "connected";
+
+    if (is_rc) {
+        return "disconnected";
     }
-    return "disconnected";
+
+    /* BLE camera: choose label based on whether this is initial pairing. */
+    if (info->ble_status == CAM_BLE_NONE) {
+        return "disconnected";
+    }
+    return info->first_pair_complete ? "connecting" : "pairing";
+}
+
+static const char *pair_state_str(pair_attempt_state_t s)
+{
+    switch (s) {
+    case PAIR_ATTEMPT_IDLE:         return "idle";
+    case PAIR_ATTEMPT_CONNECTING:   return "connecting";
+    case PAIR_ATTEMPT_BONDING:      return "bonding";
+    case PAIR_ATTEMPT_PROVISIONING: return "provisioning";
+    case PAIR_ATTEMPT_SUCCESS:      return "success";
+    case PAIR_ATTEMPT_FAILED:       return "failed";
+    default:                        return "unknown";
+    }
+}
+
+static const char *pair_error_str(pair_attempt_error_t e)
+{
+    switch (e) {
+    case PAIR_ERROR_NONE:               return "none";
+    case PAIR_ERROR_SLOTS_FULL:         return "slots_full";
+    case PAIR_ERROR_BLE_CONNECT_FAILED: return "ble_connect_failed";
+    case PAIR_ERROR_BOND_FAILED:        return "bond_failed";
+    case PAIR_ERROR_HWINFO_TIMEOUT:     return "hwinfo_timeout";
+    case PAIR_ERROR_MODEL_UNSUPPORTED:  return "model_unsupported";
+    case PAIR_ERROR_HANDSHAKE_TIMEOUT:  return "handshake_timeout";
+    case PAIR_ERROR_DISCONNECTED:       return "disconnected";
+    case PAIR_ERROR_CANCELLED:          return "cancelled";
+    case PAIR_ERROR_INTERNAL:           return "internal";
+    default:                            return "unknown";
+    }
 }
 
 /* ---- GET /api/paired-cameras ---------------------------------------------
@@ -366,8 +423,73 @@ static esp_err_t handler_pair(httpd_req_t *req)
     }
     cJSON_Delete(root);
 
+    /* Reserve the pair-attempt state machine before kicking off BLE work.
+     * If a previous attempt is still in flight, refuse with 409 — the UI is
+     * expected to wait for the previous attempt to reach a terminal state. */
+    esp_err_t err = pair_attempt_begin(ble_addr.val, ble_addr.type);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"pair already in flight\"}");
+        return ESP_FAIL;
+    }
+
     open_gopro_ble_connect_by_addr(&ble_addr);
     ESP_LOGI(TAG, "pairing initiated");
+    send_json(req, "{}");
+    return ESP_OK;
+}
+
+/* ---- GET /api/pair/status ----------------------------------------------- */
+
+static esp_err_t handler_pair_status(httpd_req_t *req)
+{
+    pair_attempt_info_t info;
+    pair_attempt_get(&info);
+
+    char addr_str[18];
+    format_mac(addr_str, info.addr);
+
+    char buf[320];
+    int n = snprintf(buf, sizeof(buf),
+        "{"
+        "\"state\":\"%s\","
+        "\"addr\":\"%s\","
+        "\"addr_type\":%u,"
+        "\"model\":%d,"
+        "\"model_name\":\"%s\","
+        "\"error_code\":\"%s\","
+        "\"error_message\":\"%s\""
+        "}",
+        pair_state_str(info.state),
+        addr_str,
+        info.addr_type,
+        (int)info.model,
+        model_name_str(info.model),
+        pair_error_str(info.error_code),
+        info.error_message);
+
+    if (n < 0 || (size_t)n >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "buffer");
+        return ESP_FAIL;
+    }
+    send_json(req, buf);
+    return ESP_OK;
+}
+
+/* ---- POST /api/pair/cancel ---------------------------------------------- */
+
+static esp_err_t handler_pair_cancel(httpd_req_t *req)
+{
+    esp_err_t err = pair_attempt_cancel();
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* No attempt in flight — not an error from the UI's POV; just report
+         * the current (possibly already-terminal) state via the same JSON
+         * shape as /api/pair/status would. */
+        ESP_LOGI(TAG, "pair cancel: no attempt in flight");
+    } else {
+        ESP_LOGI(TAG, "pair cancel: issued");
+    }
     send_json(req, "{}");
     return ESP_OK;
 }
@@ -385,6 +507,8 @@ void api_cameras_register(httpd_handle_t server)
         { .uri = "/api/scan",             .method = HTTP_POST, .handler = handler_scan            },
         { .uri = "/api/scan-cancel",      .method = HTTP_POST, .handler = handler_scan_cancel     },
         { .uri = "/api/pair",             .method = HTTP_POST, .handler = handler_pair            },
+        { .uri = "/api/pair/status",      .method = HTTP_GET,  .handler = handler_pair_status     },
+        { .uri = "/api/pair/cancel",      .method = HTTP_POST, .handler = handler_pair_cancel     },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(server, &uris[i]);

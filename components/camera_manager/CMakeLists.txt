@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "camera_manager.c"
         "mismatch.c"
+        "pair_attempt.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
