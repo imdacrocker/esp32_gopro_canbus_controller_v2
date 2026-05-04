@@ -17,6 +17,9 @@
 
 static const char *TAG = "http_api_rc";
 
+/* GoPro OUI for Hero4-era cameras that speak the WiFi-RC protocol. */
+static const uint8_t GOPRO_RC_OUI[3] = { 0xD8, 0x96, 0x85 };
+
 /*
  * GET /api/rc/discovered
  *
@@ -41,7 +44,9 @@ static esp_err_t handler_rc_discovered(httpd_req_t *req)
     int first = 1;
 
     for (int i = 0; i < n; i++) {
-        /* Only show stations not already managed by the RC driver. */
+        /* Only show GoPro RC-capable cameras — filter by OUI. */
+        if (memcmp(stations[i].mac, GOPRO_RC_OUI, 3) != 0) continue;
+        /* And only those not already managed by the RC driver. */
         if (gopro_wifi_rc_is_managed_mac(stations[i].mac)) continue;
 
         char mac_str[18];

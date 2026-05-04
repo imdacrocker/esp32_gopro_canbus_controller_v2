@@ -471,7 +471,7 @@ Title: "ADD WIFI RC EMULATION CAMERA"
 **Refresh List button** (`#rc-add-btn`): green `#27ae60`
 
 On open and on button click: `GET /api/rc/discovered`
-- Returns array of `{ addr, ip }` for SoftAP-connected stations that haven't been identified yet
+- Returns array of `{ addr, ip }` for SoftAP-connected stations whose MAC OUI matches GoPro's RC-camera prefix (`D8:96:85`) and that aren't already in a managed RC slot. Non-GoPro stations (phones, laptops viewing the web UI) are filtered out server-side.
 - 0 results: "No unidentified devices connected."
 - N results: "{N} device(s) connected — click Add to probe:"
 
@@ -532,7 +532,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | GET | `/api/pair/status` | — | `{ state, addr, addr_type, model, model_name, error_code, error_message }` | `state`: `"idle"\|"connecting"\|"bonding"\|"provisioning"\|"success"\|"failed"`. Sticky terminal state — `success` and `failed` persist until the next `POST /api/pair`. `error_code`: `"none"\|"slots_full"\|"ble_connect_failed"\|"bond_failed"\|"hwinfo_timeout"\|"model_unsupported"\|"handshake_timeout"\|"disconnected"\|"cancelled"\|"internal"`. |
 | POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types). `slot` is **1-based**. |
 | POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras. `slot` is **1-based**. |
-| GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations |
+| GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations whose MAC OUI is `D8:96:85` (GoPro). Non-GoPro stations are filtered out server-side. |
 | POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Starts async probe; firmware defaults to `HERO4_BLACK` |
 | POST | `/api/reboot` | — | `{}` or no response | ESP32 may drop connection before responding |
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |
