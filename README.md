@@ -205,7 +205,7 @@ The web UI is served from `http://10.71.79.1/`. All API endpoints return `applic
 | POST | `/api/scan` | Start BLE discovery scan |
 | POST | `/api/scan-cancel` | Cancel BLE discovery scan |
 | POST | `/api/pair` | Initiate BLE pairing with a discovered camera |
-| GET | `/api/rc/discovered` | GoPro-OUI (`D8:96:85`) SoftAP stations not yet registered as RC-emulation cameras |
+| GET | `/api/rc/discovered` | SoftAP stations matching the GoPro OUI allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c`) and not yet registered as RC-emulation cameras |
 | POST | `/api/rc/add` | Register a SoftAP station as an RC-emulation (Hero 4) camera |
 | GET | `/api/settings/timezone` | Current UTC offset in whole hours |
 | POST | `/api/settings/timezone` | Set UTC offset (`−12` to `+14`) |

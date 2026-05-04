@@ -79,11 +79,13 @@ void rc_send_datetime(int slot);
 
 /*
  * Issue a plain HTTP/1.0 GET to camera at ip:RC_HTTP_PORT.
+ * timeout_ms applies independently to send and recv on the TCP socket.
  * Returns HTTP status code (200 / 4xx / 5xx) or -1 on transport failure.
  * If resp_buf is non-NULL and buf_len > 0, the response body is written there
  * (NUL-terminated, silently truncated on overflow).
  */
-int rc_http_get(uint32_t ip, const char *path, char *resp_buf, size_t buf_len);
+int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
+                char *resp_buf, size_t buf_len);
 
 /* ---- status.c ------------------------------------------------------------ */
 

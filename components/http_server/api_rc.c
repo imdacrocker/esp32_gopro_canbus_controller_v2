@@ -17,8 +17,27 @@
 
 static const char *TAG = "http_api_rc";
 
-/* GoPro OUI for Hero4-era cameras that speak the WiFi-RC protocol. */
-static const uint8_t GOPRO_RC_OUI[3] = { 0xD8, 0x96, 0x85 };
+/* GoPro OUIs (IEEE MA-L registrations to Woodman Labs / GoPro).
+ * Used to filter SoftAP stations down to GoPro cameras only.
+ * Add new prefixes here as IEEE registers them or as we observe them in the wild. */
+static const uint8_t GOPRO_RC_OUIS[][3] = {
+    { 0x04, 0x41, 0x69 },   /* registered 2015-11-17 */
+    { 0x04, 0x57, 0x47 },   /* registered 2022-05-07 */
+    { 0x24, 0x74, 0xF7 },   /* registered 2019-08-07 */
+    { 0xAC, 0x04, 0xAA },   /* registered 2024-09-04 */
+    { 0xD4, 0x32, 0x60 },   /* registered 2018-07-28 */
+    { 0xD4, 0xD9, 0x19 },   /* registered 2013-09-12 */
+    { 0xD8, 0x96, 0x85 },   /* registered 2011-08-05 */
+    { 0xF4, 0xDD, 0x9E },   /* registered 2014-04-22 */
+};
+
+static bool mac_has_gopro_oui(const uint8_t mac[6])
+{
+    for (size_t i = 0; i < sizeof(GOPRO_RC_OUIS) / sizeof(GOPRO_RC_OUIS[0]); i++) {
+        if (memcmp(mac, GOPRO_RC_OUIS[i], 3) == 0) return true;
+    }
+    return false;
+}
 
 /*
  * GET /api/rc/discovered
@@ -45,7 +64,7 @@ static esp_err_t handler_rc_discovered(httpd_req_t *req)
 
     for (int i = 0; i < n; i++) {
         /* Only show GoPro RC-capable cameras — filter by OUI. */
-        if (memcmp(stations[i].mac, GOPRO_RC_OUI, 3) != 0) continue;
+        if (!mac_has_gopro_oui(stations[i].mac)) continue;
         /* And only those not already managed by the RC driver. */
         if (gopro_wifi_rc_is_managed_mac(stations[i].mac)) continue;
 

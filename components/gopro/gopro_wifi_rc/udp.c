@@ -23,9 +23,16 @@ static const char *TAG = "gopro_rc/udp";
 /* ---- UDP socket init ----------------------------------------------------- */
 
 /*
- * Open a single TX socket used for both keepalive unicasts and WoL broadcasts.
- * The socket is unbound (OS assigns an ephemeral source port).
- * SO_BROADCAST must be enabled for WoL packets.
+ * Open the single UDP socket used for keepalive unicasts, WoL broadcasts, and
+ * receiving keepalive ACKs back from the camera.
+ *
+ * The socket is bound to RC_UDP_RX_PORT (8383) so the keepalive's *source*
+ * port is 8383 — Hero3/4 reply to the source port (standard UDP) and won't
+ * accept a remote whose keepalive originates from an arbitrary ephemeral
+ * port.  The RX task (rc_udp_rx_task) reads ACKs from this same socket.
+ *
+ * SO_BROADCAST is required for WoL.  SO_REUSEADDR allows a clean re-bind
+ * after firmware restart without waiting for the kernel TIME_WAIT.
  */
 esp_err_t rc_udp_init(void)
 {
@@ -43,8 +50,22 @@ esp_err_t rc_udp_init(void)
         return ESP_FAIL;
     }
 
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in bind_addr = {
+        .sin_family      = AF_INET,
+        .sin_port        = htons(RC_UDP_RX_PORT),
+        .sin_addr.s_addr = INADDR_ANY,
+    };
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        ESP_LOGE(TAG, "bind() port %d failed: %d", RC_UDP_RX_PORT, errno);
+        close(sock);
+        return ESP_FAIL;
+    }
+
     s_udp_sock = sock;
-    ESP_LOGI(TAG, "TX socket opened (fd=%d)", sock);
+    ESP_LOGI(TAG, "UDP socket opened (fd=%d, src/rx port %d)", sock, RC_UDP_RX_PORT);
     return ESP_OK;
 }
 
@@ -102,7 +123,10 @@ void rc_send_wol(uint32_t ip, const uint8_t mac[6])
 /* ---- UDP RX task --------------------------------------------------------- */
 
 /*
- * Bind a dedicated socket to RC_UDP_RX_PORT and loop forever.
+ * Loop forever reading from the shared s_udp_sock (bound to RC_UDP_RX_PORT
+ * in rc_udp_init).  Using the same socket as the TX path means the camera's
+ * reply to a keepalive — sent to the keepalive's source port — lands here.
+ *
  * On each datagram:
  *   - If first byte == 0x5F (keepalive ACK), find the slot by source IP and
  *     update ctx->last_keepalive_ack.  If the slot was not yet wifi_ready,
@@ -117,42 +141,33 @@ void rc_udp_rx_task(void *arg)
 {
     (void)arg;
 
-    int rx_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (rx_sock < 0) {
-        ESP_LOGE(TAG, "RX socket() failed: %d", errno);
+    /* rc_udp_init() runs before this task is created, so s_udp_sock is valid. */
+    if (s_udp_sock < 0) {
+        ESP_LOGE(TAG, "RX task: shared socket not initialised");
         vTaskDelete(NULL);
         return;
     }
 
-    /* Allow reuse so a firmware restart doesn't leave the port locked. */
-    int reuse = 1;
-    setsockopt(rx_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    struct sockaddr_in bind_addr = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons(RC_UDP_RX_PORT),
-        .sin_addr.s_addr = INADDR_ANY,
-    };
-    if (bind(rx_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        ESP_LOGE(TAG, "bind() port %d failed: %d", RC_UDP_RX_PORT, errno);
-        close(rx_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "RX socket bound to port %d (fd=%d)", RC_UDP_RX_PORT, rx_sock);
+    ESP_LOGI(TAG, "RX task started on shared socket (fd=%d, port %d)",
+             s_udp_sock, RC_UDP_RX_PORT);
 
     uint8_t buf[64];
     struct sockaddr_in src;
     socklen_t src_len = sizeof(src);
 
     while (1) {
-        int n = recvfrom(rx_sock, buf, sizeof(buf), 0,
+        int n = recvfrom(s_udp_sock, buf, sizeof(buf), 0,
                          (struct sockaddr *)&src, &src_len);
         if (n <= 0) continue;
 
+        /* DIAGNOSTIC: log every datagram while pairing flow is being debugged. */
+        char src_str[16];
+        ip4_addr_t src_a = { .addr = src.sin_addr.s_addr };
+        ip4addr_ntoa_r(&src_a, src_str, sizeof(src_str));
+        ESP_LOGI(TAG, "RX: %d bytes from %s:%d (first byte 0x%02x)",
+                 n, src_str, ntohs(src.sin_port), buf[0]);
+
         if (n < 1 || buf[0] != RC_UDP_KEEPALIVE_ACK_BYTE) {
-            ESP_LOGV(TAG, "RX: ignoring %d-byte UDP (first byte 0x%02x)", n, buf[0]);
             continue;
         }
 
@@ -166,7 +181,7 @@ void rc_udp_rx_task(void *arg)
             }
         }
         if (matched < 0) {
-            ESP_LOGV(TAG, "RX: keepalive ACK from unknown IP");
+            ESP_LOGI(TAG, "RX: keepalive ACK from unknown IP");
             continue;
         }
 

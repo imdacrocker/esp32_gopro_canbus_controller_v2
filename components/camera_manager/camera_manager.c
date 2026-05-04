@@ -98,8 +98,11 @@ static esp_err_t save_slot_to_nvs(int slot);
 
 /* ---- Inline helpers ---- */
 static inline bool slot_valid(int s) { return s >= 0 && s < s_slot_count; }
-static inline void lock(void)   { xSemaphoreTake(s_mutex, portMAX_DELAY); }
-static inline void unlock(void) { xSemaphoreGive(s_mutex); }
+/* Recursive so driver ctx_create() callbacks (invoked under lock by
+ * set_model / register_driver) can call back into camera_manager APIs without
+ * self-deadlocking. */
+static inline void lock(void)   { xSemaphoreTakeRecursive(s_mutex, portMAX_DELAY); }
+static inline void unlock(void) { xSemaphoreGiveRecursive(s_mutex); }
 
 static void nvs_namespace(int slot, char *buf, size_t len)
 {
@@ -113,7 +116,7 @@ static void nvs_namespace(int slot, char *buf, size_t len)
 void camera_manager_init(void)
 {
     ESP_LOGI(TAG, "initiating camera manager..");
-    s_mutex = xSemaphoreCreateMutex();
+    s_mutex = xSemaphoreCreateRecursiveMutex();
     assert(s_mutex != NULL);
 
     memset(s_slots, 0, sizeof(s_slots));

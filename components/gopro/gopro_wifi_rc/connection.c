@@ -161,13 +161,25 @@ void rc_handle_probe(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
 
-    char body[RC_HTTP_STATUS_RESP_MAX];
+    /* Static — RC_HTTP_STATUS_RESP_MAX is 4 KB and the work task's stack is
+     * the same size (RC_WORK_TASK_STACK_BYTES).  Probe and status-poll both
+     * run on the work task and never overlap, so the static is safe. */
+    static char body[RC_HTTP_STATUS_RESP_MAX];
     int  code = -1;
 
     for (int attempt = 0; attempt < RC_PROBE_RETRIES; attempt++) {
+        /* Prime the camera's RC pairing with a keepalive before the HTTP
+         * request — Hero3/4 don't open their HTTP server until they've seen
+         * a valid `_GPHD_` keepalive from the WiFi remote.  The periodic
+         * keepalive timer fires every 3 s, which is too slow for the first
+         * probe; sending one inline here guarantees the camera has been
+         * "unlocked" by the time we connect. */
+        rc_send_keepalive(ctx->last_ip);
+
         ESP_LOGI(TAG, "slot %d: probe attempt %d/%d",
                  slot, attempt + 1, RC_PROBE_RETRIES);
-        code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_STATUS, body, sizeof(body));
+        code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_STATUS,
+                           RC_PROBE_TIMEOUT_MS, body, sizeof(body));
         if (code == 200) break;
         if (attempt + 1 < RC_PROBE_RETRIES) {
             vTaskDelay(pdMS_TO_TICKS(RC_PROBE_RETRY_MS));

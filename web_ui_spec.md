@@ -65,7 +65,7 @@ All values used verbatim in the current CSS:
 --orange-dark: #e67e22;   /* reboot button */
 --orange-dark-hover: #ca6f1e;
 
-/* Reds — stop, forget, reset, danger */
+/* Reds — stop, remove, reset, danger */
 --red:         #e74c3c;
 --red-hover:   #c0392b;
 --red-dark-hover: same as red-hover
@@ -159,13 +159,13 @@ border-bottom: 1px solid #ddd
 padding: 16px 20px
 ```
 
-- **Title:** "GoPro CAN-BUS Controller" — centered, `h1`, `1.15rem`, weight 600
+- **Title:** "GoPro Controller" — centered, `h1`, `1.15rem`, weight 600
 - **Settings button** (`id="settings-btn"`): absolute, vertically centered, right edge (right: 16px)
   - Gear SVG icon, 22×22, stroke currentColor
   - Default color: `#888`; hover: `#333`, background `#f0f0f0`
   - Opens the Settings top-sheet modal
 
-<!-- Title is "GoPro CAN-BUS Controller" — update if desired. -->
+<!-- Title is "GoPro Controller" — update if desired. -->
 
 ---
 
@@ -471,7 +471,7 @@ Title: "ADD WIFI RC EMULATION CAMERA"
 **Refresh List button** (`#rc-add-btn`): green `#27ae60`
 
 On open and on button click: `GET /api/rc/discovered`
-- Returns array of `{ addr, ip }` for SoftAP-connected stations whose MAC OUI matches GoPro's RC-camera prefix (`D8:96:85`) and that aren't already in a managed RC slot. Non-GoPro stations (phones, laptops viewing the web UI) are filtered out server-side.
+- Returns array of `{ addr, ip }` for SoftAP-connected stations whose MAC OUI is on the GoPro allow-list (see `GOPRO_RC_OUIS[]` in `api_rc.c` — IEEE MA-L registrations to Woodman Labs / GoPro) and that aren't already in a managed RC slot. Non-GoPro stations (phones, laptops viewing the web UI) are filtered out server-side.
 - 0 results: "No unidentified devices connected."
 - N results: "{N} device(s) connected — click Add to probe:"
 
@@ -497,7 +497,7 @@ Source: `GET /api/paired-cameras`
 
 Each camera renders as a `.modal-paired-row` (background `#fafafa`, border `#eee`, border-radius 8px):
 - Left: name line (`0.9rem`, weight 600) with optional type badge (shown when `cam.type === 'rc_emulation'`, text "WiFi RC"); meta line (`0.72rem`, `#999`) showing model_name · Cam {index} [· addr if RC-emulation]
-- Right: "Forget" (BLE) or "Remove" (RC-emulation) button in red `#e74c3c`
+- Right: "Remove" button in red `#e74c3c`
 
 **Remove flow:** Confirm dialog → `POST /api/remove-camera` with `{ slot }` → refresh lists. RC-emulation removal also waits 1.5s then refreshes `GET /api/rc/discovered` (async slot free).
 
@@ -532,7 +532,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | GET | `/api/pair/status` | — | `{ state, addr, addr_type, model, model_name, error_code, error_message }` | `state`: `"idle"\|"connecting"\|"bonding"\|"provisioning"\|"success"\|"failed"`. Sticky terminal state — `success` and `failed` persist until the next `POST /api/pair`. `error_code`: `"none"\|"slots_full"\|"ble_connect_failed"\|"bond_failed"\|"hwinfo_timeout"\|"model_unsupported"\|"handshake_timeout"\|"disconnected"\|"cancelled"\|"internal"`. |
 | POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types). `slot` is **1-based**. |
 | POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras. `slot` is **1-based**. |
-| GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations whose MAC OUI is `D8:96:85` (GoPro). Non-GoPro stations are filtered out server-side. |
+| GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations whose MAC OUI is on the GoPro allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c`). Non-GoPro stations are filtered out server-side. |
 | POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Starts async probe; firmware defaults to `HERO4_BLACK` |
 | POST | `/api/reboot` | — | `{}` or no response | ESP32 may drop connection before responding |
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |

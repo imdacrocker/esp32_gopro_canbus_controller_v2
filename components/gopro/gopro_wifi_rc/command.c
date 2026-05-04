@@ -33,7 +33,8 @@ static const char *TAG = "gopro_rc/cmd";
  * If resp_buf / buf_len are provided, the response body is written there
  * (NUL-terminated; silently truncated if the body exceeds buf_len-1).
  */
-int rc_http_get(uint32_t ip, const char *path, char *resp_buf, size_t buf_len)
+int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
+                char *resp_buf, size_t buf_len)
 {
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
@@ -42,8 +43,8 @@ int rc_http_get(uint32_t ip, const char *path, char *resp_buf, size_t buf_len)
     }
 
     struct timeval tv = {
-        .tv_sec  = RC_HTTP_TIMEOUT_MS / 1000,
-        .tv_usec = (RC_HTTP_TIMEOUT_MS % 1000) * 1000,
+        .tv_sec  = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
     };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -54,7 +55,7 @@ int rc_http_get(uint32_t ip, const char *path, char *resp_buf, size_t buf_len)
         .sin_addr.s_addr = ip,
     };
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGD(TAG, "connect() failed: %d", errno);
+        ESP_LOGI(TAG, "connect() failed: errno=%d", errno);
         close(sock);
         return -1;
     }
@@ -147,7 +148,8 @@ void rc_shutter_task(void *arg)
 
         for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
             if (!s_ctx[i].wifi_ready) continue;
-            int code = rc_http_get(s_ctx[i].last_ip, path, NULL, 0);
+            int code = rc_http_get(s_ctx[i].last_ip, path,
+                                    RC_HTTP_TIMEOUT_MS, NULL, 0);
             if (code == 200) {
                 ESP_LOGI(TAG, "slot %d: shutter %s OK",
                          i, start ? "start" : "stop");
@@ -191,7 +193,7 @@ void rc_send_datetime(int slot)
              now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
              now.tm_hour, now.tm_min, now.tm_sec);
 
-    int code = rc_http_get(ctx->last_ip, path, NULL, 0);
+    int code = rc_http_get(ctx->last_ip, path, RC_HTTP_TIMEOUT_MS, NULL, 0);
     if (code == 200) {
         ESP_LOGI(TAG, "slot %d: datetime set OK", slot);
     } else {

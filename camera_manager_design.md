@@ -1307,7 +1307,7 @@ WiFi Remote Control emulation driver for older GoPro cameras (Hero4 and similar)
 | HTTP status poll | `GET /gp/gpControl/status` every 5 s; JSON parsed for recording state and camera name |
 | HTTP shutter | `GET /gp/gpControl/command/shutter?p=1/0` per camera |
 | HTTP date/time | Raw HTTP/1.0 request on GPS lock; Hero4 does not accept standard HTTP/1.1 for command endpoints |
-| Discovery exposure | Unmanaged SoftAP stations whose MAC OUI matches GoPro (`D8:96:85`) are exposed via `/api/rc/discovered` for the manual Add flow. Other vendors (phones, laptops) are filtered out by `http_server`. |
+| Discovery exposure | Unmanaged SoftAP stations whose MAC OUI is on the GoPro allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c` — IEEE MA-L registrations to Woodman Labs / GoPro) are exposed via `/api/rc/discovered` for the manual Add flow. Other vendors (phones, laptops) are filtered out by `http_server`. |
 
 ### 17.2 Protocol Overview
 
@@ -1647,7 +1647,7 @@ All handlers follow the same structure: parse request -> call one component API 
 | `POST /api/scan` | `open_gopro_ble_start_discovery()` |
 | `POST /api/scan-cancel` | `open_gopro_ble_stop_discovery()` |
 | `POST /api/pair` | `open_gopro_ble_connect_by_addr()` |
-| `GET /api/rc/discovered` | `wifi_manager_get_connected_stations()` filtered by GoPro OUI (`D8:96:85`) and `gopro_wifi_rc_is_managed_mac()` |
+| `GET /api/rc/discovered` | `wifi_manager_get_connected_stations()` filtered by GoPro OUI allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c`) and `gopro_wifi_rc_is_managed_mac()` |
 | `POST /api/rc/add` | `gopro_wifi_rc_add_camera()` |
 | `GET /api/settings/timezone` | `can_manager_get_tz_offset_hours()` |
 | `POST /api/settings/timezone` | `can_manager_set_tz_offset()` |

@@ -761,7 +761,7 @@ function renderModalPairedCameras(cameras) {
     cameras.forEach(cam => {
         const isRc     = cam.type === 'rc_emulation';
         const typeBadge = isRc ? '<span class="cam-type-badge">WiFi RC</span>' : '';
-        const removeLabel = 'Forget';
+        const removeLabel = 'Remove';
         const metaParts = [cam.model_name, `Cam ${cam.index}`];
         if (isRc && cam.addr) metaParts.push(cam.addr);
 
@@ -782,7 +782,7 @@ document.getElementById('paired-list').addEventListener('click', e => {
     if (!btn) return;
     const slot = parseInt(btn.dataset.slot);
     const isRc = btn.dataset.rc === 'true';
-    const verb = isRc ? 'Remove' : 'Forget';
+    const verb = 'Remove';
 
     if (!confirm(`${verb} this camera?`)) return;
 

@@ -95,6 +95,7 @@ void rc_handle_status_poll_all(void)
         if (!ctx->wifi_ready) continue;
 
         int code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_STATUS,
+                               RC_HTTP_TIMEOUT_MS,
                                s_body, sizeof(s_body));
         if (code == 200) {
             ctx->recording_status = parse_recording_status(s_body);
