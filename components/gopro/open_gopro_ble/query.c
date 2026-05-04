@@ -148,8 +148,12 @@ static void dispatch(gopro_ble_ctx_t *ctx, gopro_channel_t chan,
         if (len >= GOPRO_RESP_HDR_LEN &&
             data[GOPRO_RESP_CMD_IDX] == GOPRO_CMD_GET_HARDWARE_INFO) {
             gopro_readiness_on_response(ctx, data, len);
+        } else if (len >= GOPRO_RESP_HDR_LEN &&
+                   data[GOPRO_RESP_CMD_IDX] == GOPRO_CMD_SET_THIRD_PARTY_CLIENT) {
+            gopro_readiness_handle_third_party_acked(ctx,
+                                                      data[GOPRO_RESP_STATUS_IDX]);
         } else if (len >= GOPRO_RESP_HDR_LEN) {
-            ESP_LOGD(TAG, "slot %d: cmd resp cmd=0x%02x status=0x%02x",
+            ESP_LOGI(TAG, "slot %d: cmd resp cmd=0x%02x status=0x%02x",
                      ctx->slot,
                      data[GOPRO_RESP_CMD_IDX],
                      data[GOPRO_RESP_STATUS_IDX]);

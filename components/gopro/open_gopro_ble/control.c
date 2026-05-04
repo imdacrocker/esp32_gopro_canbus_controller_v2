@@ -157,6 +157,48 @@ int gopro_control_send_pairing_finish(gopro_ble_ctx_t *ctx)
     return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.nw_mgmt_write, pkt, i);
 }
 
+/* ---- SetThirdPartyClient (legacy app-pairing handshake) ----------------- */
+
+int gopro_control_send_third_party_client(gopro_ble_ctx_t *ctx)
+{
+    if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        ESP_LOGW(TAG, "slot %d: SetThirdPartyClient skipped — not connected", ctx->slot);
+        return -1;
+    }
+
+    /* TLV: [GPBS hdr=1, cmd=0x50] — no parameters */
+    uint8_t pkt[2] = {
+        0x01u,
+        GOPRO_CMD_SET_THIRD_PARTY_CLIENT,
+    };
+
+    ESP_LOGI(TAG, "slot %d: -> SetThirdPartyClient", ctx->slot);
+    return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
+                                pkt, sizeof(pkt));
+}
+
+/* ---- SetMode (legacy mode selection) ------------------------------------ */
+
+int gopro_control_send_set_mode_video(gopro_ble_ctx_t *ctx)
+{
+    if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        ESP_LOGW(TAG, "slot %d: SetMode skipped — not connected", ctx->slot);
+        return -1;
+    }
+
+    /* TLV: [GPBS hdr=3, cmd=0x02, param_len=1, value=0x00 (Video)] */
+    uint8_t pkt[4] = {
+        0x03u,
+        GOPRO_CMD_SET_MODE,
+        0x01u,
+        GOPRO_MODE_VIDEO,
+    };
+
+    ESP_LOGI(TAG, "slot %d: -> SetMode(Video)", ctx->slot);
+    return ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
+                                pkt, sizeof(pkt));
+}
+
 /* ---- SetShutter (start/stop recording) ----------------------------------- */
 
 int gopro_control_send_shutter(gopro_ble_ctx_t *ctx, bool on)

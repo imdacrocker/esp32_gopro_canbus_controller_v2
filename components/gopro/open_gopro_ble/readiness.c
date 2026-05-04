@@ -142,6 +142,89 @@ static void complete_connection_sequence(gopro_ble_ctx_t *ctx)
     gopro_status_poll_start(ctx);
 }
 
+/* ---- Stage 3: branch by model after SetThirdPartyClient settles --------- */
+
+static void send_set_cam_ctrl(gopro_ble_ctx_t *ctx);
+
+static void proceed_after_third_party(gopro_ble_ctx_t *ctx)
+{
+    camera_model_t model = camera_manager_get_model(ctx->slot);
+    if (gopro_model_uses_legacy_ble(model)) {
+        /* Hero7 doesn't accept SetCameraControlStatus — skip it entirely
+         * rather than waiting out the 3 s timeout on every connect. */
+        complete_connection_sequence(ctx);
+        return;
+    }
+    send_set_cam_ctrl(ctx);
+}
+
+/* ---- SetThirdPartyClient response wait ----------------------------------- */
+
+static void third_party_timeout_cb(void *arg)
+{
+    gopro_ble_ctx_t *ctx = (gopro_ble_ctx_t *)arg;
+
+    if (!ctx->third_party_pending || ctx->conn_handle == GOPRO_CONN_NONE) {
+        return;
+    }
+    ESP_LOGW(TAG, "slot %d: SetThirdPartyClient timed out — proceeding anyway",
+             ctx->slot);
+    ctx->third_party_pending = false;
+    proceed_after_third_party(ctx);
+}
+
+void gopro_readiness_handle_third_party_acked(gopro_ble_ctx_t *ctx, uint8_t status)
+{
+    if (!ctx->third_party_pending) {
+        return;
+    }
+
+    if (ctx->third_party_timer) {
+        esp_timer_stop(ctx->third_party_timer);
+    }
+    ctx->third_party_pending = false;
+
+    if (status == GOPRO_RESP_STATUS_OK) {
+        ESP_LOGI(TAG, "slot %d: SetThirdPartyClient acked", ctx->slot);
+    } else {
+        ESP_LOGW(TAG, "slot %d: SetThirdPartyClient rejected (status=0x%02x) — proceeding",
+                 ctx->slot, status);
+    }
+
+    proceed_after_third_party(ctx);
+}
+
+static void send_third_party_client_with_wait(gopro_ble_ctx_t *ctx)
+{
+    if (ctx->third_party_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback        = third_party_timeout_cb,
+            .arg             = ctx,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name            = "gopro_3p",
+        };
+        if (esp_timer_create(&args, &ctx->third_party_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "slot %d: third_party timer create failed — skipping wait",
+                     ctx->slot);
+            gopro_control_send_third_party_client(ctx);
+            proceed_after_third_party(ctx);
+            return;
+        }
+    }
+
+    ctx->third_party_pending = true;
+    int rc = gopro_control_send_third_party_client(ctx);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "slot %d: SetThirdPartyClient send failed — skipping wait",
+                 ctx->slot);
+        ctx->third_party_pending = false;
+        proceed_after_third_party(ctx);
+        return;
+    }
+    esp_timer_start_once(ctx->third_party_timer,
+                         (uint64_t)GOPRO_THIRD_PARTY_TIMEOUT_MS * 1000ULL);
+}
+
 /* ---- Stage 2: SetCameraControlStatus(EXTERNAL) handshake ----------------- */
 
 static void cam_ctrl_timeout_cb(void *arg)
@@ -218,6 +301,20 @@ static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
     camera_model_t model = (camera_model_t)model_num;
     ESP_LOGI(TAG, "slot %d: hardware ready, model=%u", slot, (unsigned)model_num);
 
+    /* Frozen models are recognised but intentionally unsupported — drop the
+     * BLE connection and remove the slot before any further setup runs.  The
+     * disconnect callback will clean up driver state asynchronously; the
+     * slot removal here erases NVS and frees the camera_manager entry. */
+    if (gopro_model_is_frozen(model)) {
+        ESP_LOGW(TAG, "slot %d: model %u is frozen — disconnecting and removing camera",
+                 slot, (unsigned)model_num);
+        if (ctx->conn_handle != GOPRO_CONN_NONE) {
+            ble_gap_terminate(ctx->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        camera_manager_remove_slot(slot);
+        return;
+    }
+
     camera_manager_set_model(slot, model);
     esp_err_t save_err = camera_manager_save_slot(slot);
     if (save_err != ESP_OK) {
@@ -234,10 +331,23 @@ static void gopro_on_hw_info_ok(gopro_ble_ctx_t *ctx, uint32_t model_num)
     /* Tell the camera the initial pairing flow is complete — clears the
      * on-screen pairing prompt on supported models (Hero11 Mini / Hero12 /
      * Hero13 / Max 2 / Lit Hero).  Fire-and-forget; older models without a
-     * Network Management characteristic skip this internally. */
+     * Network Management characteristic skip this internally.  Hero7 also
+     * acks this even though it's not officially supported. */
     gopro_control_send_pairing_finish(ctx);
 
-    send_set_cam_ctrl(ctx);
+    /* Legacy SetMode(Video) — sent before SetThirdPartyClient so the camera
+     * is in the correct mode by the time we declare the app paired.  Newer
+     * cameras would use Load Preset Group (cmd 0x3E), which V2 does not
+     * implement yet. */
+    if (gopro_model_uses_legacy_ble(model)) {
+        gopro_control_send_set_mode_video(ctx);
+    }
+
+    /* SetThirdPartyClient with response wait.  proceed_after_third_party()
+     * fires on response or timeout and branches by model into either
+     * SetCameraControlStatus (modern) or complete_connection_sequence
+     * (legacy). */
+    send_third_party_client_with_wait(ctx);
 }
 
 void gopro_readiness_on_response(gopro_ble_ctx_t *ctx,
@@ -339,5 +449,11 @@ void gopro_readiness_cancel(gopro_ble_ctx_t *ctx)
         esp_timer_stop(ctx->cam_ctrl_timer);
         esp_timer_delete(ctx->cam_ctrl_timer);
         ctx->cam_ctrl_timer = NULL;
+    }
+    ctx->third_party_pending = false;
+    if (ctx->third_party_timer) {
+        esp_timer_stop(ctx->third_party_timer);
+        esp_timer_delete(ctx->third_party_timer);
+        ctx->third_party_timer = NULL;
     }
 }

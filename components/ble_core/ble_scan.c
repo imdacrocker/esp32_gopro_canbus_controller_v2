@@ -139,8 +139,8 @@ void start_scan_if_needed(void)
     ble_gap_disc_cancel(); /* BLE_HS_EALREADY is normal — scan already stopped */
 
     struct ble_gap_disc_params params = {
-        .itvl              = 0,   /* use controller defaults */
-        .window            = 0,
+        .itvl   = 0x0140,   // 320 * 0.625ms = 200 ms scan interval
+        .window = 0x0030,   //  48 * 0.625ms =  30 ms scan window  → 15% duty
         .filter_policy     = 0,   /* no HW whitelist; is_known_addr filters in SW */
         .limited           = 0,
         .passive           = 1,

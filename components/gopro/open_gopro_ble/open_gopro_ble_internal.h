@@ -46,6 +46,11 @@ typedef struct {
     bool               cam_ctrl_pending;
     esp_timer_handle_t cam_ctrl_timer;
 
+    /* SetThirdPartyClient handshake — arms before cam_ctrl, gates the rest
+     * of the sequence on a TLV response (cmd 0x50) or timeout. */
+    bool               third_party_pending;
+    esp_timer_handle_t third_party_timer;
+
     /* SetDateTime deferred-send flag — set when readiness completes but UTC
      * is not yet session-synced.  open_gopro_ble_sync_time_all() consumes
      * this flag and sends SetDateTime when UTC arrives. */
@@ -94,6 +99,14 @@ void gopro_readiness_cancel(gopro_ble_ctx_t *ctx);
  */
 void gopro_readiness_handle_cam_ctrl_acked(gopro_ble_ctx_t *ctx, uint8_t result);
 
+/*
+ * Called by query.c when the SetThirdPartyClient TLV response arrives
+ * (cmd_id 0x50).  Stops the wait timer and advances the connection sequence:
+ *  - legacy-BLE cameras skip SetCameraControlStatus and go straight to ready
+ *  - other cameras proceed into the SetCameraControlStatus handshake
+ */
+void gopro_readiness_handle_third_party_acked(gopro_ble_ctx_t *ctx, uint8_t status);
+
 /* ---- Control (control.c) ------------------------------------------------- */
 
 /* Send SetDateTime to a connected slot.  Best-effort, no retry on failure. */
@@ -113,6 +126,20 @@ int  gopro_control_send_shutter(gopro_ble_ctx_t *ctx, bool on);
  * Officially supported on Hero11 Mini / Hero12 / Hero13 / Max 2 / Lit Hero.
  */
 int  gopro_control_send_pairing_finish(gopro_ble_ctx_t *ctx);
+
+/*
+ * Send SetThirdPartyClient (TLV cmd 0x50).  Sent to every BLE camera after
+ * GetHardwareInfo — legacy Hero5/6/7 require it to complete app pairing,
+ * newer cameras accept it harmlessly.
+ */
+int  gopro_control_send_third_party_client(gopro_ble_ctx_t *ctx);
+
+/*
+ * Send legacy SetMode (TLV cmd 0x02) with mode = video.  Used only for
+ * legacy-BLE cameras (gopro_model_uses_legacy_ble); newer cameras use Load
+ * Preset Group (cmd 0x3E) instead, which is not implemented in V2 yet.
+ */
+int  gopro_control_send_set_mode_video(gopro_ble_ctx_t *ctx);
 
 /* Start the 3-second periodic BLE keepalive timer. */
 void gopro_keepalive_start(gopro_ble_ctx_t *ctx);

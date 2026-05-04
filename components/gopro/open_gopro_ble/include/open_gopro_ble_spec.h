@@ -96,6 +96,34 @@
 #define GOPRO_CMD_SET_SHUTTER  0x01u
 
 /*
+ * SetThirdPartyClient (0x50)
+ * Written to: cmd_write (GP-0072)
+ * Response on: cmd_resp_notify (GP-0073)
+ * TLV payload: [GPBS_hdr=1, cmd=0x50] — no parameters.
+ *
+ * Tells the camera that a non-official third-party app has connected.  Legacy
+ * Hero5/6/7 require this for the camera to consider itself "paired with the
+ * app" — without it the camera won't honour Wi-Fi-on requests and will fall
+ * back to "Connect new" pairing mode on reboot.  Newer cameras accept it
+ * harmlessly, so it is sent unconditionally.
+ */
+#define GOPRO_CMD_SET_THIRD_PARTY_CLIENT  0x50u
+
+/*
+ * SetMode (0x02) — legacy mode selection.
+ * Written to: cmd_write (GP-0072)
+ * Response on: cmd_resp_notify (GP-0073)
+ * TLV payload: [GPBS_hdr=3, cmd=0x02, param_len=1, value]
+ *   value: 0x00 = Video, 0x01 = Photo, 0x02 = Multishot
+ *
+ * Used only by legacy-BLE cameras (Hero7) to put the camera into video mode
+ * during the initial connection sequence so subsequent shutter commands take
+ * effect.  Newer cameras would use Load Preset Group (cmd 0x3E) instead.
+ */
+#define GOPRO_CMD_SET_MODE   0x02u
+#define GOPRO_MODE_VIDEO     0x00u
+
+/*
  * SetDateTime (0x0D)
  * Written to: cmd_write (GP-0072)
  * Response on: cmd_resp_notify (GP-0073)
@@ -267,3 +295,10 @@ static const uint8_t k_gopro_keepalive_pkt[4] = {
 /* Time we wait for the SetCameraControlStatus ResponseGeneric before giving
  * up and proceeding with the rest of the connection sequence anyway. */
 #define GOPRO_CAM_CTRL_TIMEOUT_MS     3000u
+
+/* ---- SetThirdPartyClient timeout ----------------------------------------- */
+
+/* Time we wait for the SetThirdPartyClient TLV response before giving up and
+ * proceeding.  Hero7 may not respond to cmd 0x50 — the timeout fall-through
+ * keeps the connection sequence moving in that case. */
+#define GOPRO_THIRD_PARTY_TIMEOUT_MS  3000u
