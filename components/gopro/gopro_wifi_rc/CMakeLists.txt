@@ -6,6 +6,7 @@ idf_component_register(
         "status.c"
         "udp.c"
         "settings.c"
+        "../gopro_model.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS

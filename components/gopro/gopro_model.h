@@ -22,7 +22,8 @@
 /** True if the model is any known GoPro camera (RC-emulation or BLE-control). */
 static inline bool gopro_model_is_gopro(camera_model_t model)
 {
-    return model == CAMERA_MODEL_GOPRO_HERO4_BLACK
+    return model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC
+        || model == CAMERA_MODEL_GOPRO_HERO4_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO4_SILVER
         || model == CAMERA_MODEL_GOPRO_HERO7_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO9_BLACK
@@ -38,9 +39,47 @@ static inline bool gopro_model_is_gopro(camera_model_t model)
 /** Camera connects by emulating a GoPro WiFi Remote AP. */
 static inline bool gopro_model_uses_rc_emulation(camera_model_t model)
 {
+    return model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC
+        || model == CAMERA_MODEL_GOPRO_HERO4_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO4_SILVER;
+}
+
+/**
+ * Camera responds to HTTP commands on its STA-interface IP.
+ *
+ * Hero4 onwards run an HTTP server on whatever DHCP-assigned IP they get from
+ * an external SoftAP, so we can issue gpControl GETs (status, date_time,
+ * shutter — though we use UDP for shutter for latency).
+ *
+ * Hero3-class cameras (CAMERA_MODEL_GOPRO_HERO_LEGACY_RC) do not — port 80
+ * RSTs immediately on the STA interface — so HTTP-only commands (notably
+ * date/time set) silently skip on those slots.
+ *
+ * The model is established at pair time by the HTTP `/gp/gpControl` identify
+ * probe (see camera_manager_design.md §17.5); this predicate is the gating
+ * check used by `rc_send_datetime`.
+ *
+ * Add Hero5/6/7/etc once their STA-mode HTTP behaviour is verified on
+ * hardware — model_number values from the JSON info block are logged at
+ * pair time for that purpose.
+ */
+static inline bool gopro_model_supports_http_datetime(camera_model_t model)
+{
     return model == CAMERA_MODEL_GOPRO_HERO4_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO4_SILVER;
 }
+
+/**
+ * Map a `model_name` string from the HTTP `/gp/gpControl` info JSON to a
+ * `camera_model_t` enum value.  Returns CAMERA_MODEL_GOPRO_HERO_LEGACY_RC for
+ * an unrecognised name (camera responded to gpControl but its model isn't yet
+ * in the enum — let it run on the legacy path until the mapping is added).
+ * Returns CAMERA_MODEL_UNKNOWN only when `name == NULL`.
+ *
+ * Implementation lives in `gopro_model.c` — string-compare table is too long
+ * to keep inline.
+ */
+camera_model_t gopro_model_from_name(const char *model_name);
 
 /** Camera is controlled over BLE (no WiFi association required). */
 static inline bool gopro_model_uses_ble_control(camera_model_t model)

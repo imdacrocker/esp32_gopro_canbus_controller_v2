@@ -1,14 +1,13 @@
 /*
- * command.c — Plain HTTP/1.0 GET helper, shutter task, and date/time sync.
+ * command.c — Shutter task (UDP), minimal HTTP/1.0 GET helper used only by
+ * identify + datetime, JSON substring extractor for the identify response,
+ * and the date/time setter.
  *
- * Hero4 cameras return HTTP 500 to HTTP/1.1 requests with standard headers
- * (Host, Connection, etc.).  All requests to command endpoints use HTTP/1.0
- * via raw lwip BSD sockets to avoid this.
- *
- * §17.2, §17.7, §17.8 of camera_manager_design.md.
+ * §17.2.5 (identify), §17.2.6 (date/time), §17.7 (shutter), §17.8 (sync time).
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "esp_log.h"
@@ -19,6 +18,7 @@
 #include "freertos/task.h"
 #include "camera_manager.h"
 #include "can_manager.h"
+#include "gopro_model.h"
 #include "gopro_wifi_rc_internal.h"
 
 static const char *TAG = "gopro_rc/cmd";
@@ -26,12 +26,14 @@ static const char *TAG = "gopro_rc/cmd";
 /* ---- Plain HTTP/1.0 GET helper ------------------------------------------- */
 
 /*
- * Build and send a minimal HTTP/1.0 GET request, then read the response.
- * HTTP/1.0 closes the connection after the response so we read until EOF.
+ * Minimal HTTP/1.0 GET via raw lwIP BSD sockets.  Used only for the identify
+ * probe and date/time set; not on the recurring control path.  HTTP/1.0 closes
+ * the connection after the response, so we read until EOF (or buf_len-1).
  *
- * Returns the HTTP status code (e.g. 200) on success, or -1 on error.
- * If resp_buf / buf_len are provided, the response body is written there
- * (NUL-terminated; silently truncated if the body exceeds buf_len-1).
+ * Returns the HTTP status code (e.g. 200) on success, or -1 on transport
+ * failure (connect / send / empty recv).  resp_buf, if non-NULL, receives the
+ * body (after stripping the response headers) NUL-terminated; silently
+ * truncated if buf_len-1 is exceeded.
  */
 int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
                 char *resp_buf, size_t buf_len)
@@ -55,18 +57,21 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
         .sin_addr.s_addr = ip,
     };
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGI(TAG, "connect() failed: errno=%d", errno);
+        /* errno=104 (ECONNRESET) is the expected outcome on Hero3-class
+         * cameras — they don't run an HTTP server on their STA interface.
+         * Logged at DEBUG so it doesn't drown the legacy-camera path. */
+        ESP_LOGD(TAG, "connect() failed: errno=%d", errno);
         close(sock);
         return -1;
     }
 
-    /* Format IP for Host header.  ip is in network byte order. */
+    /* Format IP for the Host header.  ip is in network byte order. */
     char ip_str[16];
     ip4_addr_t a = { .addr = ip };
     ip4addr_ntoa_r(&a, ip_str, sizeof(ip_str));
 
     /* Minimal HTTP/1.0 request — no extra headers that confuse Hero4. */
-    char req[512];
+    char req[256];
     int  req_len = snprintf(req, sizeof(req),
                             "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n",
                             path, ip_str);
@@ -76,18 +81,24 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
         return -1;
     }
 
-    /* Read the full response into a single buffer (HTTP/1.0 closes on done). */
-    char  raw[RC_HTTP_CMD_RESP_MAX];
-    int   total = 0;
-    int   n;
-    int   raw_sz = (resp_buf && buf_len > RC_HTTP_CMD_RESP_MAX)
-                 ? (int)buf_len  /* caller provided bigger buffer — use it */
-                 : (int)sizeof(raw);
-    char *rbuf   = (resp_buf && buf_len > RC_HTTP_CMD_RESP_MAX) ? resp_buf : raw;
+    /* If the caller didn't supply a buffer, drain into a tiny scratch just
+     * long enough to parse the status line. */
+    char  scratch[RC_HTTP_CMD_RESP_MAX];
+    char *rbuf;
+    int   rbuf_size;
+    if (resp_buf && buf_len > 0) {
+        rbuf      = resp_buf;
+        rbuf_size = (int)buf_len;
+    } else {
+        rbuf      = scratch;
+        rbuf_size = (int)sizeof(scratch);
+    }
 
-    while ((n = recv(sock, rbuf + total, raw_sz - 1 - total, 0)) > 0) {
+    int total = 0;
+    int n;
+    while ((n = recv(sock, rbuf + total, rbuf_size - 1 - total, 0)) > 0) {
         total += n;
-        if (total >= raw_sz - 1) break;
+        if (total >= rbuf_size - 1) break;
     }
     rbuf[total] = '\0';
     close(sock);
@@ -101,40 +112,111 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
         if (sp) status = atoi(sp + 1);
     }
 
-    /* Copy body (after "\r\n\r\n") to caller's buffer when using the small
-     * internal raw[] and the caller supplied a separate resp_buf. */
-    if (resp_buf && buf_len > 0 && rbuf == raw) {
-        const char *body = strstr(raw, "\r\n\r\n");
+    /* If the caller asked for the body, strip headers in-place. */
+    if (resp_buf && buf_len > 0) {
+        char *body = strstr(rbuf, "\r\n\r\n");
         if (body) {
             body += 4;
-            size_t body_len = (size_t)(raw + total - body);
-            size_t copy     = body_len < buf_len - 1 ? body_len : buf_len - 1;
-            memcpy(resp_buf, body, copy);
-            resp_buf[copy] = '\0';
+            size_t body_len = (size_t)(rbuf + total - body);
+            memmove(rbuf, body, body_len + 1);  /* +1 to copy NUL */
         } else {
-            resp_buf[0] = '\0';
-        }
-    } else if (resp_buf && rbuf == resp_buf) {
-        /* Caller's large buffer was used directly — strip headers in-place. */
-        char *body = strstr(resp_buf, "\r\n\r\n");
-        if (body) {
-            body += 4;
-            size_t body_len = (size_t)(resp_buf + total - body);
-            memmove(resp_buf, body, body_len + 1);
-        } else {
-            resp_buf[0] = '\0';
+            rbuf[0] = '\0';
         }
     }
 
     return status;
 }
 
+/* ---- Identify-response JSON substring extractor (§17.2.5) ---------------- */
+
+/*
+ * Find the first occurrence of "<key>": within `body` and copy the following
+ * string literal (up to the closing ") into out.  Skips whitespace between
+ * the colon and the opening quote.  Returns true on success.
+ */
+static bool extract_json_string(const char *body, const char *key,
+                                 char *out, size_t out_size)
+{
+    if (!body || !key || !out || out_size == 0) return false;
+
+    char pat[32];
+    int  pn = snprintf(pat, sizeof(pat), "\"%s\":", key);
+    if (pn < 0 || pn >= (int)sizeof(pat)) return false;
+
+    const char *p = strstr(body, pat);
+    if (!p) return false;
+    p += pn;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '"') return false;
+    p++;
+
+    size_t i = 0;
+    while (*p && *p != '"' && i < out_size - 1) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
+/*
+ * Same shape as extract_json_string but for an integer literal.
+ * Returns true on success and writes the parsed value to *out.
+ */
+static bool extract_json_int(const char *body, const char *key, int *out)
+{
+    if (!body || !key || !out) return false;
+
+    char pat[32];
+    int  pn = snprintf(pat, sizeof(pat), "\"%s\":", key);
+    if (pn < 0 || pn >= (int)sizeof(pat)) return false;
+
+    const char *p = strstr(body, pat);
+    if (!p) return false;
+    p += pn;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '-' && (*p < '0' || *p > '9')) return false;
+
+    *out = (int)strtol(p, NULL, 10);
+    return true;
+}
+
+bool rc_parse_identify_json(const char *body,
+                             char *name_out, size_t name_size,
+                             int  *model_number_out,
+                             char *fw_out,   size_t fw_size)
+{
+    if (name_out && name_size) name_out[0] = '\0';
+    if (fw_out && fw_size)     fw_out[0]   = '\0';
+    if (model_number_out)      *model_number_out = -1;
+
+    if (!body) return false;
+
+    /* Narrow the search to the "info" object so that we don't accidentally
+     * match identically-named fields elsewhere in the JSON.  `services`
+     * objects on some firmware revs contain a stray `"name"` field. */
+    const char *info = strstr(body, "\"info\"");
+    const char *scope = info ? info : body;
+
+    bool got_name = false;
+    if (name_out && name_size) {
+        got_name = extract_json_string(scope, "model_name", name_out, name_size);
+    }
+    if (model_number_out) {
+        extract_json_int(scope, "model_number", model_number_out);
+    }
+    if (fw_out && fw_size) {
+        extract_json_string(scope, "firmware_version", fw_out, fw_size);
+    }
+
+    return got_name;
+}
+
 /* ---- Shutter task (priority 7) ------------------------------------------- */
 
 /*
- * Loop forever on s_shutter_queue.  For each command, iterate all wifi_ready
- * slots and issue the appropriate HTTP GET.  Sequential across 4 cameras; the
- * design notes this should complete in < 200 ms total. (§17.7)
+ * Loop forever on s_shutter_queue.  For each command, send one UDP `SH`
+ * datagram per wifi_ready slot.  Sequential dispatch across 4 cameras now
+ * finishes inside one scheduler tick (was ~200 ms HTTP).
  */
 void rc_shutter_task(void *arg)
 {
@@ -142,41 +224,46 @@ void rc_shutter_task(void *arg)
     rc_shutter_cmd_t cmd;
     while (1) {
         xQueueReceive(s_shutter_queue, &cmd, portMAX_DELAY);
-        bool        start = (cmd == RC_SHUTTER_START);
-        const char *path  = start ? RC_HTTP_PATH_SHUTTER_START
-                                  : RC_HTTP_PATH_SHUTTER_STOP;
+        bool start = (cmd == RC_SHUTTER_START);
 
         for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
             if (!s_ctx[i].wifi_ready) continue;
-            int code = rc_http_get(s_ctx[i].last_ip, path,
-                                    RC_HTTP_TIMEOUT_MS, NULL, 0);
-            if (code == 200) {
-                ESP_LOGI(TAG, "slot %d: shutter %s OK",
-                         i, start ? "start" : "stop");
-            } else {
-                ESP_LOGW(TAG, "slot %d: shutter %s → HTTP %d",
-                         i, start ? "start" : "stop", code);
-            }
+            rc_send_sh(s_ctx[i].last_ip, start);
+            ESP_LOGD(TAG, "slot %d: shutter %s sent", i, start ? "start" : "stop");
         }
     }
 }
 
-/* ---- Date/time sync ------------------------------------------------------ */
+/* ---- Date/time sync (§17.2.6) -------------------------------------------- */
 
 /*
- * Send the current local time to a single slot's camera.
- * Skipped unless UTC has been live-synced this session by either the CAN
- * 0x602 frame or a manual web-UI set.  An NVS-restored UTC at boot does NOT
- * unlock this path — we'd rather leave the camera's own clock alone than
- * overwrite it with a stale value.
+ * Send the current local time to a single slot's camera over HTTP/1.0.
  *
- * TODO: apply the per-device timezone offset from can_manager (currently
- * sends UTC).
+ * Gated by:
+ *   - gopro_model_supports_http_datetime() — false for HERO_LEGACY_RC, so
+ *     Hero3-class slots silently skip without a noisy log.
+ *   - can_manager_utc_is_session_synced() — true only after a live UTC source
+ *     has won this session (CAN GPS frame or web-UI manual set).  An NVS-
+ *     restored UTC at boot does NOT unlock this path; we'd rather leave the
+ *     camera's clock untouched than overwrite it with a stale value.
+ *
+ * URL format follows the Lua-verified template: each of the six time fields
+ * (year mod 100, month, day, hour, minute, second) is URL-encoded as %XX hex.
+ *
+ * TODO(§17.13): apply can_manager tz offset before encoding so the camera's
+ * local-time fields are correct.  Currently sends UTC as-is.
  */
 void rc_send_datetime(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
     if (!ctx->last_ip) return;
+
+    camera_model_t model = camera_manager_get_model(slot);
+    if (!gopro_model_supports_http_datetime(model)) {
+        ESP_LOGD(TAG, "slot %d: datetime skipped — model has no HTTP datetime path",
+                 slot);
+        return;
+    }
 
     if (!can_manager_utc_is_session_synced()) {
         ESP_LOGD(TAG, "slot %d: skipping datetime — UTC not session-synced", slot);
@@ -190,14 +277,18 @@ void rc_send_datetime(int slot)
 
     char path[80];
     snprintf(path, sizeof(path), RC_HTTP_PATH_DATETIME_FMT,
-             now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
-             now.tm_hour, now.tm_min, now.tm_sec);
+             (now.tm_year + 1900) % 100,
+             now.tm_mon + 1,
+             now.tm_mday,
+             now.tm_hour,
+             now.tm_min,
+             now.tm_sec);
 
     int code = rc_http_get(ctx->last_ip, path, RC_HTTP_TIMEOUT_MS, NULL, 0);
     if (code == 200) {
         ESP_LOGI(TAG, "slot %d: datetime set OK", slot);
     } else {
-        ESP_LOGW(TAG, "slot %d: datetime set → HTTP %d", slot, code);
+        ESP_LOGD(TAG, "slot %d: datetime set → HTTP %d", slot, code);
     }
 }
 

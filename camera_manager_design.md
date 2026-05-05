@@ -1294,7 +1294,7 @@ Historical context: this component was an `esp_http_client`-based HTTPS driver t
 
 ## 17. gopro_wifi_rc
 
-WiFi Remote Control emulation driver for older GoPro cameras (Hero4 and similar). Implements the `camera_driver_t` vtable using a mix of UDP (keepalive) and HTTP (shutter, status, date/time). Camera slot persistence is owned by `camera_manager`; MAC OUI spoofing is owned by `wifi_manager`; WoL is used as the primary reconnect mechanism for cameras that have gone to sleep while still associated to the SoftAP.
+WiFi Remote Control emulation driver for the GoPro "Smart Remote" UDP protocol, accepted by Hero3 / Hero3+ / Hero4 / Hero5 / Hero7 / Hero8 as a backwards-compatible control channel. All recurring traffic — keepalive, status poll, shutter — is short binary UDP datagrams between this device's SoftAP (src port 8383) and the camera (dst port 8484). HTTP is used **only** for the optional date/time set on cameras that run an HTTP server on their STA-interface IP (Hero4+); it is not on the critical control path. Camera slot persistence stays in `camera_manager`; MAC OUI spoofing in `wifi_manager`; WoL drives reconnect for cameras that sleep while still associated to the SoftAP.
 
 ### 17.1 Responsibilities
 
@@ -1302,46 +1302,119 @@ WiFi Remote Control emulation driver for older GoPro cameras (Hero4 and similar)
 |---|---|
 | Implement `camera_driver_t` vtable | `start_recording`, `stop_recording`, `get_recording_status` |
 | Station lifecycle | React to L2 associate / DHCP / disassociate events from `wifi_manager` |
-| WoL on associate without DHCP | Send magic packet x5; retry every 2 s if camera silent for > 10 s |
-| UDP keepalive | `_GPHD_:0:0:2:0.000000\n` unicast to each ready camera, every 3 s |
-| HTTP status poll | `GET /gp/gpControl/status` every 5 s; JSON parsed for recording state and camera name |
-| HTTP shutter | `GET /gp/gpControl/command/shutter?p=1/0` per camera |
-| HTTP date/time | Raw HTTP/1.0 request on GPS lock; Hero4 does not accept standard HTTP/1.1 for command endpoints |
+| WoL on associate without DHCP | Send magic packet × 5; retry every 2 s if camera silent for > 10 s |
+| UDP keepalive | `_GPHD_:0:0:2:0.000000\n` unicast, every 3 s — fire-and-forget |
+| UDP status poll | Binary `st` opcode every 5 s; response parsed for power + recording state |
+| UDP shutter | Binary `SH` opcode (param 0x02 / 0x00) per ready camera |
+| HTTP identify probe | Single `GET /gp/gpControl` at pair time; on success, `info.model_name` / `model_number` / `firmware_version` are logged and the slot's model is set from the JSON; on failure (TCP RST / timeout), slot is marked `CAMERA_MODEL_GOPRO_HERO_LEGACY_RC` and stays on the UDP-only path |
+| HTTP date/time (best-effort) | URL-encoded hex bytes; gated on `gopro_model_supports_http_datetime()` (true for Hero4+, false for legacy fallback) |
 | Discovery exposure | Unmanaged SoftAP stations whose MAC OUI is on the GoPro allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c` — IEEE MA-L registrations to Woodman Labs / GoPro) are exposed via `/api/rc/discovered` for the manual Add flow. Other vendors (phones, laptops) are filtered out by `http_server`. |
 
 ### 17.2 Protocol Overview
 
-| Transport | Port | Direction | Purpose |
-|---|---|---|---|
-| UDP unicast | TX: 8484 | ESP32 -> camera | Keepalive only |
-| UDP receive | RX: 8383 | camera -> ESP32 | Keepalive ACK only |
-| UDP broadcast | TX: 9 | ESP32 -> 255.255.255.255 | WoL magic packet |
-| HTTP plain (port 80) | TCP | ESP32 -> camera | Shutter start/stop, status poll, date/time set, probe |
+| Transport | Local | Remote | Direction | Purpose |
+|---|---|---|---|---|
+| UDP unicast | 8383 | 8484 | ESP32 → camera | Keepalive `_GPHD_`, status `st`, shutter `SH` |
+| UDP unicast | 8383 | (from cam:8484) | camera → ESP32 | Replies — single bound socket |
+| UDP broadcast | — | 9 | ESP32 → 255.255.255.255 | WoL magic packet × 5 |
+| HTTP/1.0 | — | 80/TCP | ESP32 → camera | Identify probe + date/time set — Hero4+, best-effort |
 
-UDP is used exclusively for keepalive and WoL. All status polling and command dispatch is HTTP. TLS is not used — Hero4 cameras have no HTTPS capability on their RC interface. HTTP/1.0 is required for command endpoints; Hero4 returns HTTP 500 to standard HTTP/1.1 requests with extra headers.
+A single `SOCK_DGRAM` bound to local port 8383 carries every UDP send and receive. Hero3-era cameras reply to the source port of the keepalive — binding to 8383 gives the legitimate "WiFi Remote" source port the camera expects. HTTP/1.0 is required for command endpoints; Hero4 returns 500 to standard HTTP/1.1 requests with extra headers. Both the identify probe and date/time set target the camera's DHCP-assigned STA IP, not the documented `10.5.5.9` (which is the camera's own AP IP and is unreachable when the camera is associated to us).
+
+#### 17.2.1 Keepalive
+
+Payload: `_GPHD_:0:0:2:0.000000\n` (22 ASCII bytes). Camera reply: `_GPHD_:0:0:2:\x01` (14 bytes, first byte = `0x5F`). The RX-task dispatch path that detects ACKs by `buf[0] == 0x5F` is correct and retained.
+
+#### 17.2.2 Binary command format (`st`, `SH`, future: `CM`, `PW`, `YY`)
+
+Every binary packet shares this header:
+
+| Bytes | Field | Notes |
+|---|---|---|
+| 0–7 | Reserved | Zeros |
+| 8 | Selector | `0x00` GET, `0x01` SET |
+| 9–10 | Sequence bytes | Static per opcode (verified working against Hero3/4 with no rolling counter) |
+| 11–12 | ASCII opcode | e.g. `'s','t'`, `'S','H'` |
+| 13… | Parameters | Per-opcode |
+
+#### 17.2.3 Opcodes used by this driver
+
+Templates are copied verbatim from the Lua reference (verified working against Hero4) and the ESP8266 reference sketch. Both use `byte 8 == 0x00` for the shutter command — the public docs describe byte 8 as a GET/SET selector, but the Hero3-era cameras accept `0x00` for both query and command opcodes, so we follow the verified-working values rather than the documented selector convention.
+
+| Opcode | Byte 8 | Bytes 9–10 | Length | Purpose |
+|---|---|---|---|---|
+| `_GPHD_…` | (ASCII) | — | 22 B | Keepalive |
+| `s t` | 0x00 | 0x00, 0x00 | 13 B | Status request |
+| `S H` | 0x00 | 0x01, 0x00 | 14 B | Shutter — param byte 13: 0x02=start, 0x00=stop |
+
+Stored as `static const uint8_t` byte templates in `gopro_wifi_rc_spec.h` (`RC_PKT_ST`, `RC_PKT_SH_START`, `RC_PKT_SH_STOP`); send wrappers `sendto` directly from the template — no scratch buffer or counter state required.
+
+#### 17.2.4 Status (`st`) response parse
+
+20-byte reply. After bytes 0–10 (echo) and 11–12 (`'s','t'`):
+
+| b13 | b14 | b15 | meaning |
+|---|---|---|---|
+| 1 | × | × | camera off / sleeping → `RECORDING_UNKNOWN` |
+| 0 | mode | 1 | recording → `RECORDING_ACTIVE` |
+| 0 | mode | 0 | idle → `RECORDING_IDLE` |
+
+`b14` is mode (0=video, 1=photo, 2=burst, 3=timelapse) — not consumed today; reserved for future UI.
+
+#### 17.2.5 HTTP identify probe
+
+Single `GET /gp/gpControl HTTP/1.0` to the camera's DHCP IP, 2 s timeout, no retries.
+
+- **200 + parseable JSON**: extract `info.model_name` / `info.model_number` / `info.firmware_version`. Log all three at INFO so unrecognised models can be added to the enum over time. Map `model_name` → `camera_model_t` via `gopro_model_from_name()`. Persist via `camera_manager_set_model()` and `camera_manager_set_name()`.
+- **TCP RST (`errno=104`), timeout, non-200, or JSON parse fail**: slot is marked `CAMERA_MODEL_GOPRO_HERO_LEGACY_RC`. No retry — the probe runs once per pair-attempt session.
+
+The probe is **not** on the readiness path. Promotion to `wifi_ready` still happens on the first received UDP datagram; the probe runs in parallel and only affects the persisted model + the `supports_http_datetime` capability check.
+
+#### 17.2.6 Date/time HTTP format
+
+```
+GET /gp/gpControl/command/setup/date_time?p=%YY%MM%DD%hh%mm%ss HTTP/1.0\r\n\r\n
+```
+
+Each `%XX` is URL-encoded hex of one binary byte, in this order:
+1. `year mod 100`
+2. `month` (1–12)
+3. `day` (1–31)
+4. `hour` (0–23)
+5. `minute` (0–59)
+6. `second` (0–59)
+
+Example for 2026-05-04 14:30:00 → `?p=%1A%05%04%0E%1E%00`.
+
+Times are local; `can_manager`'s tz offset must be applied before encoding (existing TODO — see 17.13).
 
 ### 17.3 Per-Camera Driver Context (`gopro_wifi_rc_ctx_t`)
 
 ```c
 typedef struct {
     int                       slot;
-    uint32_t                  last_ip;
+    uint8_t                   mac[6];        /* WoL target */
+    uint32_t                  last_ip;       /* network byte order */
 
     camera_recording_status_t recording_status;
-    bool                      wifi_ready;
+    bool                      wifi_ready;    /* true after first UDP datagram from camera */
+    bool                      identify_attempted;  /* HTTP /gp/gpControl probe ran this session */
 
-    TickType_t                last_keepalive_ack;
+    TickType_t                last_response_tick;  /* updated by RX task on any datagram */
     esp_timer_handle_t        keepalive_timer;     /* 3 s periodic */
-
-    esp_timer_handle_t        wol_retry_timer;     /* 2 s periodic */
+    esp_timer_handle_t        wol_retry_timer;     /* 2 s periodic; armed on > 10 s silence */
 } gopro_wifi_rc_ctx_t;
 ```
 
+`last_keepalive_ack` is renamed to `last_response_tick` — liveness is now refreshed by either a `0x5F` keepalive ACK *or* an `st` response. `identify_attempted` ensures the HTTP probe only runs once per session per slot (camera reconnect doesn't re-probe).
+
 ### 17.4 Threading Model
 
-**Shutter task** (`gopro_rc_shutter`, priority 7): Processes `CMD_SHUTTER_START` and `CMD_SHUTTER_STOP` only. Makes one HTTP call per camera in sequence. Higher priority ensures shutter is never delayed by a status poll or probe.
+**Shutter task** (`gopro_rc_shutter`, priority 7): Processes `CMD_SHUTTER_START` / `CMD_SHUTTER_STOP`. Sends one UDP `SH` datagram per ready slot. Higher priority guarantees shutter latency.
 
-**Work task** (`gopro_rc_work`, priority 5): Processes all other commands — station connect, DHCP, disconnect, WoL, probe, HTTP status poll, date/time sync. Owns the UDP socket, UDP RX loop, and HTTP client handles for non-shutter calls.
+**Work task** (`gopro_rc_work`, priority 5): Station lifecycle, WoL, keepalive tick, UDP status poll, slot promotion, HTTP identify probe, HTTP date/time sync.
+
+**UDP RX task** (`gopro_rc_udp_rx`, priority 4): `recvfrom` on the shared 8383 socket. Dispatches by content (see 17.4.1). On any datagram from a known slot, updates `last_response_tick`; if the slot is not yet `wifi_ready`, posts `CMD_PROMOTE` to the work queue.
 
 ```
 wifi_manager callbacks
@@ -1349,15 +1422,34 @@ wifi_manager callbacks
   -> on_station_dhcp(mac, ip)        -> work queue: CMD_STATION_DHCP
   -> on_station_disassociated(mac)   -> work queue: CMD_STATION_DISCONNECTED
 
-esp_timer (keepalive, 3 s)    -> work queue: CMD_KEEPALIVE_TICK(slot)
-esp_timer (WoL retry, 2 s)    -> work queue: CMD_WOL_RETRY(slot)
-esp_timer (status poll, 5 s)  -> work queue: CMD_STATUS_POLL_ALL
+esp_timer (keepalive, 3 s, per slot) -> work queue: CMD_KEEPALIVE_TICK(slot)
+esp_timer (WoL retry, 2 s, per slot) -> work queue: CMD_WOL_RETRY(slot)
+esp_timer (status poll, 5 s, global) -> work queue: CMD_STATUS_POLL_ALL
+
+UDP RX task
+  - 0x5F keepalive ACK from known slot      -> update last_response_tick
+                                            -> if !wifi_ready: post CMD_PROMOTE(slot)
+  - "st" response from known slot           -> parse b13/b14/b15 → recording_status
+                                            -> update last_response_tick
+                                            -> if !wifi_ready: post CMD_PROMOTE(slot)
+  - anything else                           -> log and discard
 
 camera_driver_t vtable
-  -> start_recording(ctx)       -> shutter queue: CMD_SHUTTER_START
-  -> stop_recording(ctx)        -> shutter queue: CMD_SHUTTER_STOP
-  -> get_recording_status(ctx)  -> read ctx->recording_status directly (no post)
+  -> start_recording / stop_recording -> shutter queue (UDP SH)
+  -> get_recording_status              -> read ctx->recording_status directly
 ```
+
+`CMD_PROBE` is removed; `CMD_PROMOTE` and `CMD_HTTP_IDENTIFY` replace it.
+
+#### 17.4.1 RX dispatch rules
+
+```
+buf[0] == 0x5F                              → keepalive ACK
+buf[11] == 's' && buf[12] == 't' && n>=16   → status response
+default                                      → log/discard
+```
+
+Either of the first two paths can promote a slot to ready.
 
 ### 17.5 Connection Flow
 
@@ -1376,67 +1468,90 @@ static int find_managed_slot(const uint8_t mac[6])
 }
 ```
 
-**Station associates with DHCP lease** — camera is awake and active:
+**Station associates with DHCP lease** — camera awake:
 
 ```
 handle_station_dhcp(mac, ip)
-  -> slot = find_managed_slot(mac)
-  -> if slot < 0: return
   -> ctx->last_ip = ip
-    camera_manager_save_slot(slot)
-    arm ctx->keepalive_timer (3 s periodic)
-    post CMD_PROBE(slot) to work queue
+     camera_manager_save_slot(slot)
+     arm keepalive timer (3 s)
+  -> first _GPHD_ goes out on next keepalive tick
+  -> first `st` goes out on next status-poll tick
+  -> first response from camera (ACK or st) → CMD_PROMOTE
 ```
 
-**Station associates without DHCP lease** — may be asleep or using a cached IP:
+**Station associates without DHCP lease** — may be sleeping:
 
 ```
 handle_station_associated(mac)
-  -> slot = find_managed_slot(mac)
-  -> if slot < 0: return
   -> ip = camera_manager_get_last_ip(slot)
-    if ip == 0:
-      log warning; return   /* CMD_STATION_DHCP will follow if camera wakes */
-    send WoL magic packet x5 (broadcast to 255.255.255.255:9, targeting mac)
-    arm ctx->keepalive_timer (3 s periodic)
+     if ip == 0:  return        /* CMD_STATION_DHCP will follow if camera wakes */
+     send WoL magic packet × 5
+     arm keepalive timer
 ```
 
-**Probe**:
+**Promotion** (replaces probe):
 
 ```
-handle_probe(slot)
-  -> HTTP GET /gp/gpControl/status (timeout 5 s, up to 3 attempts, 2 s between)
-      success: parse camera name, update camera_manager_set_name(slot, name)
-               ctx->wifi_ready = true
-               camera_manager_on_camera_ready(slot)
-               send date/time (best-effort)
-      all attempts fail: log warning; ctx->wifi_ready stays false
+handle_promote(slot)
+  -> ctx->wifi_ready = true
+  -> camera_manager_on_camera_ready(slot)
+  -> if !ctx->identify_attempted:
+        ctx->identify_attempted = true
+        post CMD_HTTP_IDENTIFY(slot)
+  -> rc_send_datetime(slot)     /* gated on gopro_model_supports_http_datetime() */
 ```
+
+**HTTP identify** (runs once per pair-attempt session):
+
+```
+handle_http_identify(slot)
+  -> rc_http_get(ctx->last_ip, "/gp/gpControl",
+                 timeout=2000ms, single attempt,
+                 body buffer ~1 KB)
+     200 + JSON parses:
+       log INFO "slot N: model='HERO4 Black' model_num=13 fw='HD4.02.05.00.00'"
+       model = gopro_model_from_name(model_name)
+       camera_manager_set_model(slot, model)
+       camera_manager_set_name(slot, model_name)  /* if user hasn't named it */
+       camera_manager_save_slot(slot)
+     anything else:
+       log INFO "slot N: identify failed (errno=%d) — legacy RC camera"
+       camera_manager_set_model(slot, CAMERA_MODEL_GOPRO_HERO_LEGACY_RC)
+       camera_manager_save_slot(slot)
+```
+
+The probe is **not** on the readiness path — `wifi_ready` is already true by the time `CMD_HTTP_IDENTIFY` is dequeued. Probe failure is silent at the user level; it just shifts the slot onto the legacy code path.
+
+#### 17.5.1 Status-poll bootstrap
+
+The status-poll handler iterates **all slots with `last_ip != 0`**, not only `wifi_ready` ones. New slots can't promote without their first `st` response, so they need to be polled before they're ready.
 
 ### 17.6 WoL and Reconnect Logic
 
 ```
 handle_keepalive_tick(slot)
-  -> send UDP keepalive to ctx->last_ip
-  -> if (xTaskGetTickCount() - ctx->last_keepalive_ack) > pdMS_TO_TICKS(10000):
-        if wol_retry_timer not armed: arm wol_retry_timer (2 s periodic)
-  -> else:
-        if wol_retry_timer armed: disarm it
-        if !ctx->wifi_ready: post CMD_PROBE
+  -> rc_send_keepalive(ctx->last_ip)        /* _GPHD_ ASCII */
+  -> if last_response_tick != 0
+     and (now - last_response_tick) > 10 s:
+        if wol_retry_timer not armed: arm it (2 s)
+     else if wol_retry_timer armed:
+        disarm it
 
 handle_wol_retry(slot)
-  -> send WoL magic packet x5 (broadcast)
-  -> send UDP keepalive (unicast to last_ip)
+  -> rc_send_wol(ctx->last_ip, ctx->mac)
+  -> rc_send_keepalive(ctx->last_ip)
 
-on_keepalive_ack(src_ip)
-  -> find slot by src_ip
-  -> ctx->last_keepalive_ack = xTaskGetTickCount()
-  -> if !ctx->wifi_ready: post CMD_PROBE(slot)
+(no separate "on_keepalive_ack" handler — the RX task updates
+ last_response_tick on any datagram from the slot's IP, and posts
+ CMD_PROMOTE if the slot is not yet ready)
 ```
 
-**WoL packet**: 102-byte magic packet: `FF FF FF FF FF FF` + target MAC x16. Broadcast to `255.255.255.255:9`. Sent in a burst of 5.
+**WoL packet**: 102-byte magic packet: `FF FF FF FF FF FF` + target MAC × 16. Broadcast to `255.255.255.255:9`. Sent in a burst of 5.
 
-**WoL retry termination**: The WoL retry timer continues until either a keepalive ACK arrives (disarms the timer) or the camera disassociates from the SoftAP. There is intentionally no max-retry counter — the SoftAP's 60 s inactive-time (section 11.2) evicts the silent station, which disarms the timer in the disconnect handler. WoL retry is naturally bounded to <= 60 s.
+**WoL retry termination**: The WoL retry timer continues until either a keepalive ACK or `st` response arrives (disarms the timer) or the camera disassociates from the SoftAP. There is intentionally no max-retry counter — the SoftAP's 60 s inactive-time (§11.2) evicts the silent station, which disarms the timer in the disconnect handler. WoL retry is naturally bounded to ≤ 60 s.
+
+Liveness is now measured against any received UDP datagram (ACK *or* `st` response), not specifically a `0x5F`-prefixed ACK.
 
 ### 17.7 Shutter Commands
 
@@ -1445,20 +1560,20 @@ Handled by the high-priority shutter task:
 ```
 handle_shutter(bool start)
   -> for each slot where ctx->wifi_ready == true:
-        HTTP GET /gp/gpControl/command/shutter?p=1   (or p=0)
-        timeout: 2 s
-        non-200: log warning
+        rc_send_sh(ctx->last_ip, start)   /* one UDP datagram, ~50 µs */
 ```
 
-Sequential dispatch across 4 cameras is expected to complete in < 200 ms total. If measured latency is unacceptable, this is the rollback point to UDP broadcast.
+Single UDP `sendto` per camera. Was ~50 ms HTTP per camera; now < 1 ms per camera. Sequential dispatch across 4 cameras finishes inside one scheduler tick — no longer a synchronization concern.
 
 ### 17.8 Periodic Work
 
-**Keepalive** (3 s `esp_timer`): UDP unicast `_GPHD_:0:0:2:0.000000\n` to each slot's `last_ip`. This is the liveness signal that drives WoL retry.
+**Keepalive** (3 s `esp_timer`, per slot): UDP `_GPHD_:0:0:2:0.000000\n` to `ctx->last_ip`. Fire-and-forget.
 
-**Status poll** (5 s `esp_timer`): Independent timer. On each tick, `GET /gp/gpControl/status` for every slot where `ctx->wifi_ready == true`. The JSON response is parsed for recording state (field `"8"` inside `"status"`) and the camera name (field `"30"`).
+**Status poll** (5 s `esp_timer`, global): UDP `st` packet to every slot with `last_ip != 0` (not just `wifi_ready` ones — see §17.5.1). Response handled async by the RX task.
 
-**UDP RX loop**: Dedicated lightweight task. Parses only keepalive ACKs (`buf[0] == 0x5F`). All other UDP traffic is logged and discarded.
+**UDP RX loop** (dedicated task on the shared 8383 socket): dispatches by content per §17.4.1. `0x5F`-first-byte → keepalive ACK; opcode `'s','t'` in bytes 11–12 → status response. Any other payload is logged at VERBOSE and discarded.
+
+There is no periodic HTTP traffic. The HTTP identify probe runs once per pair-attempt session (see §17.5); date/time runs once on promote and again on `gopro_wifi_rc_sync_time_all()`.
 
 ### 17.9 Disconnect
 
@@ -1492,15 +1607,27 @@ void gopro_wifi_rc_sync_time_all(void);
 
 ### 17.12 Source File Layout
 
-| File | URL path / area | Contents |
-|---|---|---|
-| `include/gopro_wifi_rc_spec.h` | All paths | UDP payload constants, HTTP endpoint paths, JSON field names, port numbers. |
-| `driver.c` | — | `gopro_wifi_rc_init()`, vtable registration, `create_driver_ctx()`, public API, global timer init |
-| `connection.c` | — | Station lifecycle handlers, probe, WoL send, keepalive/WoL-retry timer arming |
-| `command.c` | `/gp/gpControl/command/` | Shutter task; date/time set (raw HTTP/1.0 socket) |
-| `status.c` | `/gp/gpControl/status` | 5 s status poll timer, `handle_status_poll_all()`, JSON parsing |
-| `settings.c` | `/gp/gpControl/settings/` | Placeholder — settings sub-commands not yet implemented. |
-| `udp.c` | UDP (ports 8484 / 8383 / 9) | UDP socket init, keepalive send, WoL magic packet send, UDP RX loop, keepalive ACK parsing |
+| File | Contents |
+|---|---|
+| `include/gopro_wifi_rc_spec.h` | Port numbers, `_GPHD_` payload string, opcode byte templates (`RC_PKT_ST[]`, `RC_PKT_SH_START[]`, `RC_PKT_SH_STOP[]`), response-field offsets, timing constants, HTTP path strings (identify + date/time only) |
+| `driver.c` | Init, vtable registration, work-queue dispatch, global status-poll timer |
+| `connection.c` | Station lifecycle handlers, **promote** (replaces probe), HTTP identify handler, keepalive tick, WoL retry, timer arm/disarm |
+| `command.c` | Shutter task (UDP `SH`); `rc_send_datetime` (HTTP `setup/date_time`); `rc_http_get` retained as a minimal helper used only by identify + datetime — no body buffer beyond ~1 KB, no retry loop, no JSON. JSON parsing of the identify response lives here too (search for `"model_name"` / `"model_number"` / `"firmware_version"` substrings, no cJSON dependency). |
+| `status.c` | Status-poll handler (sends UDP `st`); `parse_st_response()` (binary b13/b14/b15) |
+| `udp.c` | Single bound socket on 8383; `rc_send_keepalive`, `rc_send_st`, `rc_send_sh`, `rc_send_wol`; RX task with 0x5F + `st` dispatch |
+| `settings.c` | (unchanged placeholder) |
+| `gopro_model.c` | `gopro_model_from_name()` lookup table (lives in the gopro umbrella component, used by identify) |
+
+Removed: 4 KB body buffer, JSON status-field constants, `RC_HTTP_PATH_STATUS`, `RC_HTTP_PATH_SHUTTER_*`, probe retry constants, `parse_recording_status()` JSON parser.
+
+### 17.13 Known TODOs
+
+| Where | Issue |
+|---|---|
+| `gopro_model.c` | `gopro_model_from_name()` lookup table is seeded from public docs (`CameraCodenames.md`) and known mappings: HERO4 Black=13, HERO4 Silver=12. Hero5 / Hero6 / Hero7 / Hero8 model_number values must be confirmed by inspecting the JSON logged at pair time on real hardware before being added to `gopro_model_supports_http_datetime()` and the lookup table. |
+| `command.c` `rc_send_datetime` | URL-encoded hex-byte format works on Hero4 (verified by Lua reference). Currently sends UTC; `can_manager`'s tz offset must be applied before encoding so the camera's local-time fields are correct. |
+| `command.c` `rc_send_datetime` | Hero3-class (`CAMERA_MODEL_GOPRO_HERO_LEGACY_RC`) has no working date/time path — the camera does not run an HTTP server on its STA interface, and the binary `setTM` UDP variant was flagged as broken in the ESP8266 reference. Currently a documented limitation; UI may want to surface "camera clock not synced" to the user. |
+| Future opcodes | `YY` (battery / mode get / clock get), `CM` (mode change), `PW` (power off) are documented in §17.2 but not implemented. |
 
 
 ---

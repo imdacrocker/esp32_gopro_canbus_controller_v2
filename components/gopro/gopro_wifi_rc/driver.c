@@ -69,8 +69,11 @@ static void rc_work_task(void *arg)
         case RC_CMD_STATUS_POLL_ALL:
             rc_handle_status_poll_all();
             break;
-        case RC_CMD_PROBE:
-            rc_handle_probe(cmd.slot_cmd.slot);
+        case RC_CMD_PROMOTE:
+            rc_handle_promote(cmd.slot_cmd.slot);
+            break;
+        case RC_CMD_HTTP_IDENTIFY:
+            rc_handle_http_identify(cmd.slot_cmd.slot);
             break;
         case RC_CMD_SYNC_TIME_ALL:
             rc_handle_sync_time_all();
@@ -207,9 +210,12 @@ void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip)
         ESP_LOGE(TAG, "add_camera: no free slots");
         return;
     }
-    /* Default to Hero4 Black — model picker in the web UI is a future TODO
-     * (web_ui_spec.md §17).  set_model assigns this driver and calls ctx_create. */
-    camera_manager_set_model(slot, CAMERA_MODEL_GOPRO_HERO4_BLACK);
+    /* Register as the legacy/unidentified RC fallback.  The HTTP identify
+     * probe (fired from rc_handle_promote on first response) will upgrade
+     * this to HERO4_BLACK / SILVER / future Hero5+ on cameras that respond
+     * to GET /gp/gpControl, or leave it as LEGACY_RC on Hero3-class.
+     * set_model assigns the gopro_wifi_rc driver and calls ctx_create. */
+    camera_manager_set_model(slot, CAMERA_MODEL_GOPRO_HERO_LEGACY_RC);
 
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
     ctx->last_ip = ip;
@@ -218,15 +224,17 @@ void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip)
     /* RC-emulation cameras have no multi-step pairing handshake — the user
      * picks them from the unmanaged-stations list and they're remembered
      * immediately.  Mark first_pair_complete so the WiFi status mapping
-     * stays semantically clean (the field is used by BLE for the
-     * Pairing/Connecting split, but RC slots may be exposed via the same
-     * info struct). */
+     * stays semantically clean. */
     camera_manager_mark_first_pair_complete(slot);
 
-    rc_arm_keepalive_timer(ctx);
+    /* Prime the camera with one keepalive + one status request so it responds
+     * within ms instead of waiting up to 3-5 s for the next scheduled tick.
+     * RX task will post CMD_PROMOTE on the first response, which will fire
+     * the HTTP identify probe to settle the model. */
+    rc_send_keepalive(ip);
+    rc_send_st(ip);
 
-    rc_work_cmd_t cmd = { .type = RC_CMD_PROBE, .slot_cmd = { .slot = slot } };
-    xQueueSend(s_work_queue, &cmd, 0);
+    rc_arm_keepalive_timer(ctx);
 
     ESP_LOGI(TAG, "slot %d: add_camera mac=%02x:%02x:%02x:%02x:%02x:%02x",
              slot, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

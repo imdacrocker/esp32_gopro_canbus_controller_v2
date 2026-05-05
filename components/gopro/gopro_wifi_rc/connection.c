@@ -1,13 +1,13 @@
 /*
- * connection.c — Station lifecycle handlers, HTTP probe, and per-slot
- * keepalive / WoL-retry timer management.  All functions here run on the
- * work task unless otherwise noted.
+ * connection.c — Station lifecycle handlers, slot promotion, HTTP identify
+ * probe, keepalive watchdog, and per-slot keepalive / WoL-retry timer
+ * management.  All functions here run on the work task unless otherwise noted.
  *
- * §17.5, §17.6, §18.2 of camera_manager_design.md.
+ * §17.4, §17.5, §17.6 of camera_manager_design.md.
  */
 
+#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -110,9 +110,10 @@ void rc_handle_station_associated(const uint8_t mac[6])
     }
 
     /* Camera is associating with a known cached IP (reuse from previous session).
-     * It may be asleep; send WoL and arm keepalive. */
+     * It may be asleep; send WoL, prime with a keepalive, and arm the timer. */
     ESP_LOGI(TAG, "slot %d: associated (no DHCP), sending WoL burst", slot);
     rc_send_wol(ip, ctx->mac);
+    rc_send_keepalive(ip);
     rc_arm_keepalive_timer(ctx);
 }
 
@@ -126,12 +127,16 @@ void rc_handle_station_dhcp(const uint8_t mac[6], uint32_t ip)
     memcpy(ctx->mac, mac, 6); /* Keep MAC in sync (also set by driver add flow). */
     camera_manager_save_slot(slot);
 
+    /* Prime the camera with one keepalive + one status request so it responds
+     * within ms instead of waiting for the next scheduled timer tick.  The RX
+     * task will post CMD_PROMOTE on the first response. */
+    rc_send_keepalive(ip);
+    rc_send_st(ip);
+
     rc_arm_keepalive_timer(ctx);
 
-    rc_work_cmd_t cmd = { .type = RC_CMD_PROBE, .slot_cmd = { .slot = slot } };
-    xQueueSend(s_work_queue, &cmd, 0);
-
-    ESP_LOGI(TAG, "slot %d: DHCP ip=%lu — probing", slot, (unsigned long)ip);
+    ESP_LOGI(TAG, "slot %d: DHCP ip=%lu — primed, waiting for first response",
+             slot, (unsigned long)ip);
 }
 
 void rc_handle_station_disconnected(const uint8_t mac[6])
@@ -144,84 +149,121 @@ void rc_handle_station_disconnected(const uint8_t mac[6])
     rc_disarm_wol_retry_timer(ctx);
     ctx->wifi_ready       = false;
     ctx->recording_status = CAMERA_RECORDING_UNKNOWN;
+    /* identify_attempted is intentionally NOT cleared — once a probe has run
+     * this firmware session, the slot's model is settled (HERO4_* on success,
+     * HERO_LEGACY_RC on failure).  Re-running the probe on every reconnect
+     * adds no new information and risks misclassifying a transient HTTP
+     * failure as a model downgrade. */
     camera_manager_on_wifi_disconnected(slot);
 
     ESP_LOGI(TAG, "slot %d: disassociated", slot);
 }
 
-/* ---- HTTP probe ---------------------------------------------------------- */
+/* ---- Promotion (replaces probe) ------------------------------------------ */
 
 /*
- * Try GET /gp/gpControl/status up to RC_PROBE_RETRIES times.
- * On success: update camera name, mark wifi_ready, call
- * camera_manager_on_camera_ready(), send date/time best-effort.
- * On failure: log and return; next on_station_dhcp will retry.
+ * Posted by the UDP RX task when the first datagram arrives from a slot's IP
+ * (keepalive ACK or `st` response).  Idempotent — duplicate posts are a no-op
+ * because the first one flips wifi_ready.
+ *
+ * Triggers the one-shot HTTP identify probe (per session) and the best-effort
+ * date/time set.  Neither is on the readiness path; if either fails, the
+ * camera is still considered ready.
  */
-void rc_handle_probe(int slot)
+void rc_handle_promote(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
-
-    /* Static — RC_HTTP_STATUS_RESP_MAX is 4 KB and the work task's stack is
-     * the same size (RC_WORK_TASK_STACK_BYTES).  Probe and status-poll both
-     * run on the work task and never overlap, so the static is safe. */
-    static char body[RC_HTTP_STATUS_RESP_MAX];
-    int  code = -1;
-
-    for (int attempt = 0; attempt < RC_PROBE_RETRIES; attempt++) {
-        /* Prime the camera's RC pairing with a keepalive before the HTTP
-         * request — Hero3/4 don't open their HTTP server until they've seen
-         * a valid `_GPHD_` keepalive from the WiFi remote.  The periodic
-         * keepalive timer fires every 3 s, which is too slow for the first
-         * probe; sending one inline here guarantees the camera has been
-         * "unlocked" by the time we connect. */
-        rc_send_keepalive(ctx->last_ip);
-
-        ESP_LOGI(TAG, "slot %d: probe attempt %d/%d",
-                 slot, attempt + 1, RC_PROBE_RETRIES);
-        code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_STATUS,
-                           RC_PROBE_TIMEOUT_MS, body, sizeof(body));
-        if (code == 200) break;
-        if (attempt + 1 < RC_PROBE_RETRIES) {
-            vTaskDelay(pdMS_TO_TICKS(RC_PROBE_RETRY_MS));
-        }
-    }
-
-    if (code != 200) {
-        ESP_LOGW(TAG, "slot %d: probe failed (last code=%d)", slot, code);
-        return;
-    }
-
-    /* Parse camera name from field RC_STATUS_JSON_NAME inside "status" object.
-     * TODO(hardware): verify field "30" is camera name on Hero4; may need to
-     * call /gp/gpControl/info instead. */
-    const char *name_key = "\"" RC_STATUS_JSON_NAME "\":";
-    const char *p = strstr(body, name_key);
-    if (p) {
-        p += strlen(name_key);
-        while (*p == ' ') p++;
-        if (*p == '"') {
-            p++;
-            char name[32] = {0};
-            int  i        = 0;
-            while (*p && *p != '"' && i < (int)sizeof(name) - 1) {
-                name[i++] = *p++;
-            }
-            if (i > 0) {
-                camera_manager_set_name(slot, name);
-            }
-        }
-    }
+    if (ctx->wifi_ready) return;
 
     ctx->wifi_ready = true;
     camera_manager_on_camera_ready(slot);
-    ESP_LOGI(TAG, "slot %d: probe OK — wifi ready", slot);
+    ESP_LOGI(TAG, "slot %d: promoted — camera ready", slot);
 
-    /* Date/time — best-effort; only if system clock has been set by can_manager. */
+    if (!ctx->identify_attempted) {
+        ctx->identify_attempted = true;
+        rc_work_cmd_t cmd = { .type = RC_CMD_HTTP_IDENTIFY,
+                              .slot_cmd = { .slot = slot } };
+        xQueueSend(s_work_queue, &cmd, 0);
+    }
+
+    /* Date/time is internally gated on gopro_model_supports_http_datetime() —
+     * a no-op on the legacy fallback (HERO_LEGACY_RC). */
     rc_send_datetime(slot);
+}
+
+/* ---- HTTP identify probe ------------------------------------------------- */
+
+/*
+ * One-shot blocking HTTP GET /gp/gpControl, single attempt, RC_HTTP_TIMEOUT_MS
+ * timeout.  Runs on the work task; the slot is already wifi_ready by the time
+ * we get here, so a 2 s blocking call is acceptable — the RX task continues
+ * receiving keepalive ACKs / `st` responses on its own task.
+ *
+ * On success: extract info.model_name / info.model_number / info.firmware_version
+ * from the JSON body and persist them to the slot.  Logs all three at INFO so
+ * unrecognised models can be added to gopro_model_from_name() over time.
+ *
+ * On failure (RST, timeout, non-200, parse fail): mark the slot as
+ * CAMERA_MODEL_GOPRO_HERO_LEGACY_RC and persist.  Hero3-class cameras don't
+ * run an HTTP server on their STA interface — this is the expected legacy path.
+ */
+void rc_handle_http_identify(int slot)
+{
+    gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
+    if (ctx->last_ip == 0) {
+        ESP_LOGW(TAG, "slot %d: identify skipped — no IP", slot);
+        return;
+    }
+
+    char *body = malloc(RC_HTTP_IDENTIFY_RESP_MAX);
+    if (!body) {
+        ESP_LOGW(TAG, "slot %d: identify malloc(%d) failed",
+                 slot, RC_HTTP_IDENTIFY_RESP_MAX);
+        return;
+    }
+
+    int code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_IDENTIFY,
+                           RC_HTTP_TIMEOUT_MS,
+                           body, RC_HTTP_IDENTIFY_RESP_MAX);
+
+    char model_name[32]   = {0};
+    int  model_number     = -1;
+    char firmware[32]     = {0};
+
+    bool parsed = (code == 200) &&
+                  rc_parse_identify_json(body,
+                                          model_name,   sizeof(model_name),
+                                          &model_number,
+                                          firmware,     sizeof(firmware));
+
+    if (parsed) {
+        ESP_LOGI(TAG, "slot %d: identify OK — model='%s' model_num=%d fw='%s'",
+                 slot, model_name, model_number, firmware);
+
+        camera_model_t mapped = gopro_model_from_name(model_name);
+        camera_manager_set_model(slot, mapped);
+        if (model_name[0] != '\0') {
+            camera_manager_set_name(slot, model_name);
+        }
+        camera_manager_save_slot(slot);
+    } else {
+        ESP_LOGI(TAG, "slot %d: identify failed (code=%d) — legacy RC camera",
+                 slot, code);
+        camera_manager_set_model(slot, CAMERA_MODEL_GOPRO_HERO_LEGACY_RC);
+        camera_manager_save_slot(slot);
+    }
+
+    free(body);
 }
 
 /* ---- Keepalive tick handler ---------------------------------------------- */
 
+/*
+ * Send a keepalive every RC_KEEPALIVE_INTERVAL_MS, then check the silence
+ * window: if no UDP datagram (ACK or `st` response) has arrived from the camera
+ * for RC_KEEPALIVE_SILENCE_MS, arm the WoL retry timer.  When traffic resumes
+ * the RX task refreshes last_response_tick and the next tick disarms the timer.
+ */
 void rc_handle_keepalive_tick(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
@@ -229,25 +271,20 @@ void rc_handle_keepalive_tick(int slot)
     rc_send_keepalive(ctx->last_ip);
 
     TickType_t now     = xTaskGetTickCount();
-    TickType_t silence = now - ctx->last_keepalive_ack;
+    TickType_t silence = now - ctx->last_response_tick;
 
-    if (ctx->last_keepalive_ack != 0 &&
-        silence > pdMS_TO_TICKS(RC_KEEPALIVE_SILENCE_MS)) {
-        /* No ACK for 10 s — camera may have gone to sleep. */
+    bool silent = (ctx->last_response_tick != 0 &&
+                   silence > pdMS_TO_TICKS(RC_KEEPALIVE_SILENCE_MS));
+
+    if (silent) {
         if (ctx->wol_retry_timer == NULL ||
             !esp_timer_is_active(ctx->wol_retry_timer)) {
-            ESP_LOGW(TAG, "slot %d: keepalive silence %lu ms — arming WoL retry",
+            ESP_LOGW(TAG, "slot %d: silence %lu ms — arming WoL retry",
                      slot, (unsigned long)(silence * portTICK_PERIOD_MS));
             rc_arm_wol_retry_timer(ctx);
         }
     } else if (ctx->wol_retry_timer && esp_timer_is_active(ctx->wol_retry_timer)) {
-        /* ACK is fresh — disarm WoL retry. */
         rc_disarm_wol_retry_timer(ctx);
-        if (!ctx->wifi_ready) {
-            rc_work_cmd_t cmd = { .type = RC_CMD_PROBE,
-                                  .slot_cmd = { .slot = slot } };
-            xQueueSend(s_work_queue, &cmd, 0);
-        }
     }
 }
 

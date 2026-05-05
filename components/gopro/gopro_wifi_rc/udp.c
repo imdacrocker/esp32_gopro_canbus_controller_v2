@@ -1,12 +1,20 @@
 /*
- * udp.c — UDP socket init, keepalive TX, Wake-on-LAN TX, and RX task.
+ * udp.c — UDP socket init, TX wrappers (keepalive, status, shutter, WoL),
+ * and the RX task that dispatches incoming datagrams to per-slot state.
  *
- * Transports:
- *   TX keepalive : UDP unicast  → camera IP : port 8484
- *   TX WoL       : UDP broadcast → 255.255.255.255 : port 9
- *   RX ACKs      : UDP bound on port 8383; first byte 0x5F = keepalive ACK
+ * Single bound socket: local port 8383 for both TX (so the camera replies to
+ * the canonical "WiFi Remote" source port) and RX (camera's reply lands here).
  *
- * §17.2, §17.6, §17.8 of camera_manager_design.md.
+ * RX dispatch (§17.4.1):
+ *   - buf[0] == 0x5F                            → keepalive ACK
+ *   - buf[11] == 's' && buf[12] == 't' && n>=16 → status response
+ *   - anything else                              → log/discard
+ *
+ * Either path updates ctx->last_response_tick and posts CMD_PROMOTE if the
+ * slot is not yet wifi_ready.  Status-response decode is delegated to
+ * rc_parse_st_response() in status.c.
+ *
+ * §17.2, §17.4, §17.6 of camera_manager_design.md.
  */
 
 #include <string.h>
@@ -23,13 +31,13 @@ static const char *TAG = "gopro_rc/udp";
 /* ---- UDP socket init ----------------------------------------------------- */
 
 /*
- * Open the single UDP socket used for keepalive unicasts, WoL broadcasts, and
- * receiving keepalive ACKs back from the camera.
+ * Open the single UDP socket used for keepalive unicasts, status requests,
+ * shutter commands, WoL broadcasts, and receiving replies.
  *
- * The socket is bound to RC_UDP_RX_PORT (8383) so the keepalive's *source*
- * port is 8383 — Hero3/4 reply to the source port (standard UDP) and won't
- * accept a remote whose keepalive originates from an arbitrary ephemeral
- * port.  The RX task (rc_udp_rx_task) reads ACKs from this same socket.
+ * Bound to RC_UDP_RX_PORT (8383) so the keepalive's *source* port is 8383 —
+ * Hero3/4 reply to the source port (standard UDP) and won't accept a remote
+ * whose keepalive originates from an arbitrary ephemeral port.  The RX task
+ * (rc_udp_rx_task) reads replies from this same socket.
  *
  * SO_BROADCAST is required for WoL.  SO_REUSEADDR allows a clean re-bind
  * after firmware restart without waiting for the kernel TIME_WAIT.
@@ -69,9 +77,9 @@ esp_err_t rc_udp_init(void)
     return ESP_OK;
 }
 
-/* ---- Keepalive TX -------------------------------------------------------- */
+/* ---- TX helpers ---------------------------------------------------------- */
 
-void rc_send_keepalive(uint32_t ip)
+static void send_to_camera(uint32_t ip, const void *payload, size_t len)
 {
     if (s_udp_sock < 0 || ip == 0) return;
 
@@ -80,9 +88,28 @@ void rc_send_keepalive(uint32_t ip)
         .sin_port        = htons(RC_UDP_TX_PORT),
         .sin_addr.s_addr = ip,
     };
-    const char *payload = RC_UDP_KEEPALIVE_PAYLOAD;
-    sendto(s_udp_sock, payload, strlen(payload), 0,
+    sendto(s_udp_sock, payload, len, 0,
            (struct sockaddr *)&dst, sizeof(dst));
+}
+
+void rc_send_keepalive(uint32_t ip)
+{
+    const char *payload = RC_UDP_KEEPALIVE_PAYLOAD;
+    send_to_camera(ip, payload, strlen(payload));
+}
+
+void rc_send_st(uint32_t ip)
+{
+    send_to_camera(ip, RC_PKT_ST, sizeof(RC_PKT_ST));
+}
+
+void rc_send_sh(uint32_t ip, bool start)
+{
+    const uint8_t *pkt = start ? RC_PKT_SH_START : RC_PKT_SH_STOP;
+    /* Both templates are the same length, but use the matching sizeof for
+     * clarity if they ever diverge. */
+    size_t len = start ? sizeof(RC_PKT_SH_START) : sizeof(RC_PKT_SH_STOP);
+    send_to_camera(ip, pkt, len);
 }
 
 /* ---- Wake-on-LAN TX ------------------------------------------------------ */
@@ -123,19 +150,47 @@ void rc_send_wol(uint32_t ip, const uint8_t mac[6])
 /* ---- UDP RX task --------------------------------------------------------- */
 
 /*
- * Loop forever reading from the shared s_udp_sock (bound to RC_UDP_RX_PORT
- * in rc_udp_init).  Using the same socket as the TX path means the camera's
- * reply to a keepalive — sent to the keepalive's source port — lands here.
+ * Find the slot whose ctx->last_ip matches src_ip (and last_ip != 0).
+ * Returns -1 if no slot is currently associated with that source IP.
+ */
+static int find_slot_by_ip(uint32_t src_ip)
+{
+    for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
+        if (s_ctx[i].last_ip == src_ip && s_ctx[i].last_ip != 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Common bookkeeping for any datagram we receive from a known slot's IP:
+ *   - Refresh last_response_tick (drives the WoL silence watchdog)
+ *   - If the slot is not yet wifi_ready, post CMD_PROMOTE so the work task
+ *     flips the flag, fires the HTTP identify probe, and sends date/time.
  *
- * On each datagram:
- *   - If first byte == 0x5F (keepalive ACK), find the slot by source IP and
- *     update ctx->last_keepalive_ack.  If the slot was not yet wifi_ready,
- *     post CMD_PROBE so the work task probes it.
- *   - All other payloads are logged at VERBOSE and discarded.
- *
- * last_keepalive_ack is a TickType_t (32-bit on ESP32).  Xtensa LX7 guarantees
- * aligned 32-bit stores are atomic, so no mutex is needed for the single writer
- * (this task) and single reader (work task in rc_handle_keepalive_tick).
+ * last_response_tick is a TickType_t (32-bit on Xtensa LX7); aligned 32-bit
+ * stores are atomic, so the single-writer (this task) / single-reader
+ * (work task in keepalive_tick) pattern needs no mutex.
+ */
+static void on_response_from_slot(int slot)
+{
+    s_ctx[slot].last_response_tick = xTaskGetTickCount();
+
+    if (!s_ctx[slot].wifi_ready) {
+        rc_work_cmd_t cmd = { .type = RC_CMD_PROMOTE,
+                              .slot_cmd = { .slot = slot } };
+        xQueueSend(s_work_queue, &cmd, 0);
+    }
+}
+
+/*
+ * Loop forever reading from the shared s_udp_sock.  Dispatch by content:
+ *   - buf[0] == 0x5F                              → keepalive ACK
+ *   - buf[11..12] == "st" and n >= 16             → status response
+ *                                                   (bytes 13/14/15 decoded
+ *                                                    by rc_parse_st_response)
+ *   - anything else                               → log at VERBOSE, discard
  */
 void rc_udp_rx_task(void *arg)
 {
@@ -160,38 +215,29 @@ void rc_udp_rx_task(void *arg)
                          (struct sockaddr *)&src, &src_len);
         if (n <= 0) continue;
 
-        /* DIAGNOSTIC: log every datagram while pairing flow is being debugged. */
-        char src_str[16];
-        ip4_addr_t src_a = { .addr = src.sin_addr.s_addr };
-        ip4addr_ntoa_r(&src_a, src_str, sizeof(src_str));
-        ESP_LOGI(TAG, "RX: %d bytes from %s:%d (first byte 0x%02x)",
-                 n, src_str, ntohs(src.sin_port), buf[0]);
-
-        if (n < 1 || buf[0] != RC_UDP_KEEPALIVE_ACK_BYTE) {
-            continue;
-        }
-
-        /* Keepalive ACK — find the slot whose last_ip matches the sender. */
         uint32_t src_ip = src.sin_addr.s_addr;
-        int matched = -1;
-        for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
-            if (s_ctx[i].last_ip == src_ip && s_ctx[i].last_ip != 0) {
-                matched = i;
-                break;
-            }
-        }
-        if (matched < 0) {
-            ESP_LOGI(TAG, "RX: keepalive ACK from unknown IP");
+        int slot = find_slot_by_ip(src_ip);
+        if (slot < 0) {
+            ESP_LOGV(TAG, "RX: %d bytes from unknown source", n);
             continue;
         }
 
-        gopro_wifi_rc_ctx_t *ctx = &s_ctx[matched];
-        ctx->last_keepalive_ack = xTaskGetTickCount();
-
-        if (!ctx->wifi_ready) {
-            rc_work_cmd_t cmd = { .type = RC_CMD_PROBE,
-                                  .slot_cmd = { .slot = matched } };
-            xQueueSend(s_work_queue, &cmd, 0);
+        /* Keepalive ACK — first byte is `_` (0x5F). */
+        if (buf[0] == RC_UDP_KEEPALIVE_ACK_BYTE) {
+            on_response_from_slot(slot);
+            continue;
         }
+
+        /* Status response — opcode "st" in bytes 11-12, full frame ≥ 16 B. */
+        if (n >= RC_RESP_MIN_BYTES &&
+            buf[RC_RESP_OPCODE_OFFSET]     == 's' &&
+            buf[RC_RESP_OPCODE_OFFSET + 1] == 't') {
+            rc_parse_st_response(slot, buf, n);
+            on_response_from_slot(slot);
+            continue;
+        }
+
+        ESP_LOGV(TAG, "RX: unhandled %d-byte datagram (first byte 0x%02x)",
+                 n, buf[0]);
     }
 }

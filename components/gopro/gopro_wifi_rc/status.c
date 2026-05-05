@@ -1,114 +1,74 @@
 /*
- * status.c — Periodic HTTP status poll and JSON recording-state parser.
+ * status.c — Periodic UDP `st` poll and binary status-response parser.
  *
- * rc_handle_status_poll_all() is called every 5 s from the work task when the
- * global status-poll timer fires.  It issues GET /gp/gpControl/status to every
- * wifi_ready slot and updates ctx->recording_status from the response.
+ * The poll handler runs every RC_STATUS_POLL_INTERVAL_MS on the work task and
+ * fires one UDP `st` datagram at every slot with last_ip != 0 (not just
+ * wifi_ready ones — newly-added slots can't promote until they receive their
+ * first response, see §17.5.1).
  *
- * §17.8 of camera_manager_design.md.
+ * The parser runs on the UDP RX task when an opcode-`st` datagram arrives and
+ * decodes bytes 13/14/15 into ctx->recording_status.  recording_status is a
+ * single enum (≤ 4 B) written only here; aligned 32-bit stores are atomic on
+ * Xtensa LX7, so the single-writer / single-reader pattern (work-task readers
+ * via `get_recording_status`) needs no mutex.
+ *
+ * §17.2.4, §17.4.1, §17.8 of camera_manager_design.md.
  */
 
-#include <string.h>
 #include "esp_log.h"
 #include "camera_manager.h"
 #include "gopro_wifi_rc_internal.h"
 
 static const char *TAG = "gopro_rc/status";
 
-/* ---- JSON parser --------------------------------------------------------- */
+/* ---- Status-response decode (§17.2.4) ------------------------------------ */
 
-/*
- * Parse the recording state from a /gp/gpControl/status response body.
- *
- * Response shape: { "status": { "8": <int>, ... }, "settings": {...} }
- *
- * Strategy:
- *   1. Find the "status" key.
- *   2. Find the opening '{' of its object.
- *   3. Find "8": inside that object.
- *   4. Parse the integer value (0 = idle, non-zero = recording).
- *
- * Returns CAMERA_RECORDING_ACTIVE, CAMERA_RECORDING_IDLE, or
- * CAMERA_RECORDING_UNKNOWN on parse failure.
- */
-static camera_recording_status_t parse_recording_status(const char *body)
+void rc_parse_st_response(int slot, const uint8_t *buf, int len)
 {
-    /* 1. Locate the "status" key. */
-    const char *status_token = "\"" RC_STATUS_JSON_OBJ "\"";
-    const char *p = strstr(body, status_token);
-    if (!p) return CAMERA_RECORDING_UNKNOWN;
-    p += strlen(status_token);
+    if (slot < 0 || slot >= CAMERA_MAX_SLOTS) return;
+    if (len < RC_RESP_MIN_BYTES) return;
 
-    /* 2. Find the '{' that opens the status object. */
-    p = strchr(p, '{');
-    if (!p) return CAMERA_RECORDING_UNKNOWN;
-    const char *obj_start = p + 1;
+    gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
 
-    /* 3. Find the matching '}' at the same nesting level. */
-    const char *obj_end = strchr(obj_start, '}');
-    if (!obj_end) return CAMERA_RECORDING_UNKNOWN;
+    uint8_t pwr   = buf[RC_RESP_PWR_OFFSET];
+    uint8_t state = buf[RC_RESP_STATE_OFFSET];
 
-    /* 4. Locate "8": inside the object bounds, taking care not to match "18"
-     *    or "108" — the character before the key's opening quote must be a
-     *    JSON separator ('{', ',') or whitespace-preceded separator. */
-    const char *needle = "\"" RC_STATUS_JSON_ENCODING "\":";
-    const char *key    = obj_start;
-    while (key < obj_end) {
-        key = strstr(key, needle);
-        if (!key || key >= obj_end) return CAMERA_RECORDING_UNKNOWN;
-
-        /* Walk backwards past whitespace to find the preceding delimiter. */
-        const char *prev = key - 1;
-        while (prev >= obj_start &&
-               (*prev == ' ' || *prev == '\n' || *prev == '\r' || *prev == '\t')) {
-            prev--;
-        }
-        if (prev >= obj_start && *prev != '{' && *prev != ',') {
-            key++; /* False match (e.g. "18") — keep searching. */
-            continue;
-        }
-        break;
+    camera_recording_status_t next;
+    if (pwr == 1) {
+        /* Camera reports off/sleeping — recording state is meaningless. */
+        next = CAMERA_RECORDING_UNKNOWN;
+    } else if (state == 1) {
+        next = CAMERA_RECORDING_ACTIVE;
+    } else {
+        next = CAMERA_RECORDING_IDLE;
     }
-    if (!key || key >= obj_end) return CAMERA_RECORDING_UNKNOWN;
 
-    key += strlen(needle);
-    while (*key == ' ') key++;
-
-    if (*key == '0') return CAMERA_RECORDING_IDLE;
-    if (*key >= '1' && *key <= '9') return CAMERA_RECORDING_ACTIVE;
-    return CAMERA_RECORDING_UNKNOWN;
+    if (next != ctx->recording_status) {
+        ESP_LOGD(TAG, "slot %d: %s → %s",
+                 slot,
+                 ctx->recording_status == CAMERA_RECORDING_ACTIVE ? "recording" :
+                 ctx->recording_status == CAMERA_RECORDING_IDLE   ? "idle"      :
+                                                                    "unknown",
+                 next == CAMERA_RECORDING_ACTIVE ? "recording" :
+                 next == CAMERA_RECORDING_IDLE   ? "idle"      :
+                                                   "unknown");
+    }
+    ctx->recording_status = next;
 }
 
-/* ---- Poll handler -------------------------------------------------------- */
+/* ---- Status poll (§17.8) ------------------------------------------------- */
 
 /*
- * Called every 5 s from the work task.  Polls all wifi_ready slots
- * sequentially and updates each slot's recording_status cache.
+ * Called every RC_STATUS_POLL_INTERVAL_MS from the work task.  Sends one UDP
+ * `st` request to each slot that has an IP — not gated on wifi_ready so that
+ * newly-added slots can promote on the first response.  Replies are handled
+ * asynchronously by rc_udp_rx_task → rc_parse_st_response().
  */
 void rc_handle_status_poll_all(void)
 {
-    /* Static buffer — avoids 4 KB stack allocation per call. */
-    static char s_body[RC_HTTP_STATUS_RESP_MAX];
-
     for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
         gopro_wifi_rc_ctx_t *ctx = &s_ctx[i];
-        if (!ctx->wifi_ready) continue;
-
-        int code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_STATUS,
-                               RC_HTTP_TIMEOUT_MS,
-                               s_body, sizeof(s_body));
-        if (code == 200) {
-            ctx->recording_status = parse_recording_status(s_body);
-            ESP_LOGD(TAG, "slot %d: status poll → %s", i,
-                     ctx->recording_status == CAMERA_RECORDING_ACTIVE  ? "recording" :
-                     ctx->recording_status == CAMERA_RECORDING_IDLE    ? "idle"      :
-                                                                          "unknown");
-        } else if (code > 0) {
-            ESP_LOGW(TAG, "slot %d: status poll → HTTP %d", i, code);
-            ctx->recording_status = CAMERA_RECORDING_UNKNOWN;
-        } else {
-            ESP_LOGW(TAG, "slot %d: status poll — transport error", i);
-            ctx->recording_status = CAMERA_RECORDING_UNKNOWN;
-        }
+        if (ctx->last_ip == 0) continue;
+        rc_send_st(ctx->last_ip);
     }
 }

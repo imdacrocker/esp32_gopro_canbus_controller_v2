@@ -1,60 +1,123 @@
 /*
- * gopro_wifi_rc_spec.h — Protocol constants for the GoPro WiFi Remote emulation
- * driver.  All raw values (ports, payload strings, paths, field names) live here
- * so that nothing magic appears in .c files.  §17 of camera_manager_design.md.
+ * gopro_wifi_rc_spec.h — Wire-protocol constants for the GoPro WiFi Smart-Remote
+ * driver.  Pure constants and command byte templates; no behavioural code lives
+ * here.  See camera_manager_design.md §17 for the protocol description.
+ *
+ * Two transports are used:
+ *   - UDP (single bound socket, local port 8383, remote 8484): keepalive,
+ *     status poll, shutter — all recurring traffic
+ *   - HTTP/1.0 (port 80): identify probe at pair time, plus the optional
+ *     date/time set on Hero4-class cameras.  Off the critical path; a TCP
+ *     RST on the legacy fallback is expected and handled silently.
  */
 #pragma once
 
-/* ---- UDP (§17.2) --------------------------------------------------------- */
+#include <stdint.h>
+#include <stddef.h>
 
-/* Keepalive payload sent unicast to each camera at TX_PORT every 3 s. */
-#define RC_UDP_KEEPALIVE_PAYLOAD    "_GPHD_:0:0:2:0.000000\n"
-/* Camera -> ESP32 ACK arrives on RX_PORT; first byte == ACK_BYTE. */
-#define RC_UDP_TX_PORT              8484
-#define RC_UDP_RX_PORT              8383
-#define RC_UDP_WOL_PORT             9
-#define RC_UDP_KEEPALIVE_ACK_BYTE   0x5F
+/* ---- Ports (§17.2) ------------------------------------------------------- */
 
-/* ---- HTTP (§17.2) -------------------------------------------------------- */
-
-/* Plain HTTP, port 80.  HTTP/1.0 required — Hero4 returns 500 on HTTP/1.1. */
+#define RC_UDP_TX_PORT              8484   /* destination on camera */
+#define RC_UDP_RX_PORT              8383   /* local bind; also our source port */
+#define RC_UDP_WOL_PORT             9      /* broadcast magic packet */
 #define RC_HTTP_PORT                80
 
-/* GoPro old WiFi API endpoints */
-#define RC_HTTP_PATH_STATUS         "/gp/gpControl/status"
-#define RC_HTTP_PATH_SHUTTER_START  "/gp/gpControl/command/shutter?p=1"
-#define RC_HTTP_PATH_SHUTTER_STOP   "/gp/gpControl/command/shutter?p=0"
-/* printf format: year, month, day, hour, min, sec (all local time) */
-#define RC_HTTP_PATH_DATETIME_FMT   "/gp/gpControl/command/setup/date_time?p=%04d_%02d_%02d_%02d_%02d_%02d"
+/* ---- Keepalive (§17.2.1) ------------------------------------------------- */
 
-/* ---- JSON field IDs (old GoPro WiFi API status object) ------------------- */
+/* ASCII payload, sent every RC_KEEPALIVE_INTERVAL_MS to each slot's last_ip. */
+#define RC_UDP_KEEPALIVE_PAYLOAD    "_GPHD_:0:0:2:0.000000\n"
 
-#define RC_STATUS_JSON_OBJ          "status"
-/* Encoding / recording state: 0 = idle, non-zero = recording. */
-#define RC_STATUS_JSON_ENCODING     "8"
-/* Camera name string.
- * TODO(hardware): verify field "30" is camera name on Hero4.  The field may
- * need to be read from /gp/gpControl/info instead. */
-#define RC_STATUS_JSON_NAME         "30"
+/* Keepalive ACK first byte; full reply is "_GPHD_:0:0:2:\x01" (14 B). */
+#define RC_UDP_KEEPALIVE_ACK_BYTE   0x5F
 
-/* ---- Timing -------------------------------------------------------------- */
+/* ---- Binary command templates (§17.2.2 / §17.2.3) ------------------------ */
 
-#define RC_KEEPALIVE_INTERVAL_MS    3000   /* Per-slot UDP keepalive period */
-#define RC_WOL_RETRY_INTERVAL_MS    2000   /* Per-slot WoL retry period */
-#define RC_STATUS_POLL_INTERVAL_MS  5000   /* Global HTTP status poll period */
-/* WoL retry fires when no ACK received for this long after keepalive armed. */
+/*
+ * Every binary packet shares a 13-byte header:
+ *   bytes 0-7   : zero
+ *   byte  8     : selector (documented as GET/SET in the public docs, but the
+ *                 Hero3-era cameras accept byte 8 == 0 for both query and
+ *                 command opcodes; we follow the Lua-verified values)
+ *   bytes 9-10  : sequence/counter (camera does not enforce monotonicity;
+ *                 static values per opcode work in practice)
+ *   bytes 11-12 : two-character ASCII opcode
+ *   bytes 13+   : opcode-specific parameters
+ *
+ * Templates below are copied verbatim from the working Lua reference and from
+ * the ESP8266 reference sketch — both target Hero3/4 successfully.
+ */
+
+/* Status request — opcode "st", 13 bytes. Camera replies with a 20-byte
+ * status frame whose decode rules are in §17.2.4. */
+static const uint8_t RC_PKT_ST[13] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,             /* selector */
+    0x00, 0x00,       /* counter */
+    's',  't',
+};
+
+/* Shutter start — opcode "SH", parameter 0x02, 14 bytes. */
+static const uint8_t RC_PKT_SH_START[14] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,             /* selector */
+    0x01, 0x00,       /* counter */
+    'S',  'H',
+    0x02,             /* p=start */
+};
+
+/* Shutter stop — opcode "SH", parameter 0x00, 14 bytes. */
+static const uint8_t RC_PKT_SH_STOP[14] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,             /* selector */
+    0x01, 0x00,       /* counter */
+    'S',  'H',
+    0x00,             /* p=stop */
+};
+
+/* ---- Status (`st`) response field offsets (§17.2.4) ---------------------- */
+
+/* All offsets are into a 20-byte response packet. */
+#define RC_RESP_OPCODE_OFFSET       11   /* bytes 11-12 echo the request opcode */
+#define RC_RESP_PWR_OFFSET          13   /* 1 = camera off / sleeping */
+#define RC_RESP_MODE_OFFSET         14   /* 0=video, 1=photo, 2=burst, 3=timelapse */
+#define RC_RESP_STATE_OFFSET        15   /* 1 = recording (when pwr == 0) */
+
+/* Minimum bytes required before parse_st_response indexes b13/b14/b15. */
+#define RC_RESP_MIN_BYTES           16
+
+/* ---- HTTP paths (§17.2.5 / §17.2.6) -------------------------------------- */
+
+/* Identify probe — single GET at pair time. JSON in body has info.model_name,
+ * info.model_number, info.firmware_version which we substring-extract. */
+#define RC_HTTP_PATH_IDENTIFY       "/gp/gpControl"
+
+/* Date/time set — printf format takes 6 ints in this order:
+ *   year mod 100, month, day, hour, minute, second
+ * Each is URL-encoded as %XX where XX is the lowercase hex of the value.
+ * Example for 2026-05-04 14:30:00 → "/gp/.../date_time?p=%1a%05%04%0e%1e%00".
+ * Times are local; can_manager tz offset must be applied before formatting
+ * (TODO §17.13). */
+#define RC_HTTP_PATH_DATETIME_FMT \
+    "/gp/gpControl/command/setup/date_time?p=%%%02x%%%02x%%%02x%%%02x%%%02x%%%02x"
+
+/* ---- Timing (§17.6 / §17.8) ---------------------------------------------- */
+
+#define RC_KEEPALIVE_INTERVAL_MS    3000   /* per-slot UDP keepalive period */
+#define RC_WOL_RETRY_INTERVAL_MS    2000   /* per-slot WoL retry period */
+#define RC_STATUS_POLL_INTERVAL_MS  5000   /* global UDP status-poll period */
+
+/* WoL retry is armed when no response received for this long. */
 #define RC_KEEPALIVE_SILENCE_MS     10000
 
 /* ---- HTTP timeouts ------------------------------------------------------- */
 
+/* Single-attempt timeout for both the identify probe and date/time set.
+ * Applies to connect, send, and recv. */
 #define RC_HTTP_TIMEOUT_MS          2000
-#define RC_PROBE_TIMEOUT_MS         5000
-#define RC_PROBE_RETRIES            3
-#define RC_PROBE_RETRY_MS           2000
 
 /* ---- Wake-on-LAN --------------------------------------------------------- */
 
-#define RC_WOL_BURST                5      /* Magic packets sent per WoL event */
+#define RC_WOL_BURST                5      /* magic packets sent per WoL event */
 
 /* ---- Task / queue parameters --------------------------------------------- */
 
@@ -70,7 +133,15 @@
 
 /* ---- Response buffer sizes ----------------------------------------------- */
 
-/* Status endpoint response can be several KB on Hero4. */
-#define RC_HTTP_STATUS_RESP_MAX     4096
-/* Command endpoint responses are tiny; we only care about the status code. */
+/*
+ * Identify response (HTTP GET /gp/gpControl) is several KB of JSON; we only
+ * need enough to find the info object's three fields.  The info block is
+ * typically near the end of the JSON, so we read enough to be sure we capture
+ * it.  4 KB matches what Hero4/5/6/7 emit in practice; tune if logs reveal
+ * truncation past the info block.
+ */
+#define RC_HTTP_IDENTIFY_RESP_MAX   4096
+
+/* Command-channel HTTP responses (date/time set) are tiny; we don't even read
+ * the body — just the status line. */
 #define RC_HTTP_CMD_RESP_MAX        256

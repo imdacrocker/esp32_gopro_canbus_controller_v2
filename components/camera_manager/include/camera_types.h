@@ -11,9 +11,15 @@
 typedef enum {
     CAMERA_MODEL_UNKNOWN            = 0,
 
-    /* GoPro RC-emulation (project-assigned IDs — user selects at pairing) */
-    CAMERA_MODEL_GOPRO_HERO4_BLACK  = 40,
-    CAMERA_MODEL_GOPRO_HERO4_SILVER = 41,
+    /* GoPro RC-emulation (project-assigned IDs).
+     * Hero4 Black / Silver are identified via HTTP `/gp/gpControl` probe at
+     * pair time; HERO_LEGACY_RC is the fallback when the probe fails (camera
+     * has no HTTP server on its STA interface — Hero3/3+ era).  Legacy cameras
+     * speak only the binary UDP RC protocol; HTTP-based commands like
+     * date/time set are not available on them. */
+    CAMERA_MODEL_GOPRO_HERO_LEGACY_RC = 39,
+    CAMERA_MODEL_GOPRO_HERO4_BLACK    = 40,
+    CAMERA_MODEL_GOPRO_HERO4_SILVER   = 41,
 
     /* GoPro BLE */
     CAMERA_MODEL_GOPRO_HERO7_BLACK  = 30,
