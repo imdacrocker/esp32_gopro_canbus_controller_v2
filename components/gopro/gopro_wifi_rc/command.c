@@ -6,6 +6,7 @@
  * §17.2.5 (identify), §17.2.6 (date/time), §17.7 (shutter), §17.8 (sync time).
  */
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,11 +39,98 @@ static const char *TAG = "gopro_rc/cmd";
 int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
                 char *resp_buf, size_t buf_len)
 {
+    /* Format IP for logs and Host header (ip is in network byte order). */
+    char ip_str[16];
+    ip4_addr_t a = { .addr = ip };
+    ip4addr_ntoa_r(&a, ip_str, sizeof(ip_str));
+
+    /* DEBUG-TRACE: log each HTTP transaction stage at INFO so we can see
+     * exactly where a camera-specific failure (RST, slow recv, etc.) lands.
+     * Lower to LOGD once the legacy-camera HTTP paths are confirmed. */
+    ESP_LOGI(TAG, "HTTP GET http://%s%s (timeout %d ms)",
+             ip_str, path, timeout_ms);
+
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
-        ESP_LOGW(TAG, "socket() failed: %d", errno);
+        ESP_LOGW(TAG, "  └ socket() failed: errno=%d", errno);
         return -1;
     }
+
+    /* Non-blocking connect + select-based timeout.
+     *
+     * ESP-IDF lwIP's blocking connect() does NOT honor SO_SNDTIMEO — observed
+     * 18 s waits with a 2 s SO_SNDTIMEO when the camera silently drops the
+     * SYN (Hero3/Hero7 in RC mode have no HTTP server on their STA interface
+     * and exhaust the full TCP SYN-retry window before failing with errno=113
+     * EHOSTUNREACH).
+     *
+     * Using O_NONBLOCK + select() bounds the wait to exactly timeout_ms,
+     * which keeps the work task responsive (≤ 2 s blocked on the identify
+     * probe instead of ≤ 18 s — short enough that keepalive ticks for ready
+     * slots aren't starved). */
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        ESP_LOGW(TAG, "  └ fcntl O_NONBLOCK failed: errno=%d", errno);
+        close(sock);
+        return -1;
+    }
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_port        = htons(RC_HTTP_PORT),
+        .sin_addr.s_addr = ip,
+    };
+
+    TickType_t t0 = xTaskGetTickCount();
+    int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        ESP_LOGI(TAG, "  └ connect failed immediately: errno=%d", errno);
+        close(sock);
+        return -1;
+    }
+
+    if (rc != 0) {
+        /* Wait for socket to become writable = connect resolved (success or
+         * fail).  select() respects timeout_ms exactly. */
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        struct timeval ctv = {
+            .tv_sec  = timeout_ms / 1000,
+            .tv_usec = (timeout_ms % 1000) * 1000,
+        };
+        int sel = select(sock + 1, NULL, &wfds, NULL, &ctv);
+        if (sel <= 0) {
+            ESP_LOGI(TAG, "  └ connect timed out after %lu ms (sel=%d errno=%d) "
+                          "— camera has no HTTP server on STA",
+                     (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS),
+                     sel, errno);
+            close(sock);
+            return -1;
+        }
+
+        /* Connect resolved — check whether it succeeded. */
+        int conn_err = 0;
+        socklen_t conn_err_len = sizeof(conn_err);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &conn_err_len) < 0
+            || conn_err != 0) {
+            ESP_LOGI(TAG, "  └ connect failed after %lu ms: errno=%d (%s)",
+                     (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS),
+                     conn_err,
+                     conn_err == 104 ? "ECONNRESET — no HTTP server on STA" :
+                     conn_err == 110 ? "ETIMEDOUT" :
+                     conn_err == 111 ? "ECONNREFUSED" :
+                     conn_err == 113 ? "EHOSTUNREACH — SYN retries exhausted" : "?");
+            close(sock);
+            return -1;
+        }
+    }
+    ESP_LOGI(TAG, "  └ connected in %lu ms",
+             (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
+
+    /* Restore blocking mode for send/recv (driven by SO_RCVTIMEO/SO_SNDTIMEO,
+     * which DO apply correctly outside of connect). */
+    fcntl(sock, F_SETFL, flags);
 
     struct timeval tv = {
         .tv_sec  = timeout_ms / 1000,
@@ -51,35 +139,21 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    struct sockaddr_in addr = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons(RC_HTTP_PORT),
-        .sin_addr.s_addr = ip,
-    };
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        /* errno=104 (ECONNRESET) is the expected outcome on Hero3-class
-         * cameras — they don't run an HTTP server on their STA interface.
-         * Logged at DEBUG so it doesn't drown the legacy-camera path. */
-        ESP_LOGD(TAG, "connect() failed: errno=%d", errno);
-        close(sock);
-        return -1;
-    }
-
-    /* Format IP for the Host header.  ip is in network byte order. */
-    char ip_str[16];
-    ip4_addr_t a = { .addr = ip };
-    ip4addr_ntoa_r(&a, ip_str, sizeof(ip_str));
-
     /* Minimal HTTP/1.0 request — no extra headers that confuse Hero4. */
     char req[256];
     int  req_len = snprintf(req, sizeof(req),
                             "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n",
                             path, ip_str);
-    if (send(sock, req, req_len, 0) < 0) {
-        ESP_LOGD(TAG, "send() failed: %d", errno);
+    TickType_t t1 = xTaskGetTickCount();
+    int sent = send(sock, req, req_len, 0);
+    if (sent < 0) {
+        ESP_LOGI(TAG, "  └ send failed: errno=%d", errno);
         close(sock);
         return -1;
     }
+    ESP_LOGI(TAG, "  └ sent %d/%d bytes in %lu ms",
+             sent, req_len,
+             (unsigned long)((xTaskGetTickCount() - t1) * portTICK_PERIOD_MS));
 
     /* If the caller didn't supply a buffer, drain into a tiny scratch just
      * long enough to parse the status line. */
@@ -94,14 +168,21 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
         rbuf_size = (int)sizeof(scratch);
     }
 
+    TickType_t t2 = xTaskGetTickCount();
     int total = 0;
     int n;
     while ((n = recv(sock, rbuf + total, rbuf_size - 1 - total, 0)) > 0) {
         total += n;
         if (total >= rbuf_size - 1) break;
     }
+    int recv_errno = (n < 0) ? errno : 0;
     rbuf[total] = '\0';
     close(sock);
+
+    ESP_LOGI(TAG, "  └ recv: %d bytes in %lu ms (last n=%d errno=%d)",
+             total,
+             (unsigned long)((xTaskGetTickCount() - t2) * portTICK_PERIOD_MS),
+             n, recv_errno);
 
     if (total == 0) return -1;
 
@@ -111,6 +192,7 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
         const char *sp = strchr(rbuf, ' ');
         if (sp) status = atoi(sp + 1);
     }
+    ESP_LOGI(TAG, "  └ HTTP status=%d", status);
 
     /* If the caller asked for the body, strip headers in-place. */
     if (resp_buf && buf_len > 0) {
@@ -125,90 +207,6 @@ int rc_http_get(uint32_t ip, const char *path, int timeout_ms,
     }
 
     return status;
-}
-
-/* ---- Identify-response JSON substring extractor (§17.2.5) ---------------- */
-
-/*
- * Find the first occurrence of "<key>": within `body` and copy the following
- * string literal (up to the closing ") into out.  Skips whitespace between
- * the colon and the opening quote.  Returns true on success.
- */
-static bool extract_json_string(const char *body, const char *key,
-                                 char *out, size_t out_size)
-{
-    if (!body || !key || !out || out_size == 0) return false;
-
-    char pat[32];
-    int  pn = snprintf(pat, sizeof(pat), "\"%s\":", key);
-    if (pn < 0 || pn >= (int)sizeof(pat)) return false;
-
-    const char *p = strstr(body, pat);
-    if (!p) return false;
-    p += pn;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '"') return false;
-    p++;
-
-    size_t i = 0;
-    while (*p && *p != '"' && i < out_size - 1) {
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return true;
-}
-
-/*
- * Same shape as extract_json_string but for an integer literal.
- * Returns true on success and writes the parsed value to *out.
- */
-static bool extract_json_int(const char *body, const char *key, int *out)
-{
-    if (!body || !key || !out) return false;
-
-    char pat[32];
-    int  pn = snprintf(pat, sizeof(pat), "\"%s\":", key);
-    if (pn < 0 || pn >= (int)sizeof(pat)) return false;
-
-    const char *p = strstr(body, pat);
-    if (!p) return false;
-    p += pn;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '-' && (*p < '0' || *p > '9')) return false;
-
-    *out = (int)strtol(p, NULL, 10);
-    return true;
-}
-
-bool rc_parse_identify_json(const char *body,
-                             char *name_out, size_t name_size,
-                             int  *model_number_out,
-                             char *fw_out,   size_t fw_size)
-{
-    if (name_out && name_size) name_out[0] = '\0';
-    if (fw_out && fw_size)     fw_out[0]   = '\0';
-    if (model_number_out)      *model_number_out = -1;
-
-    if (!body) return false;
-
-    /* Narrow the search to the "info" object so that we don't accidentally
-     * match identically-named fields elsewhere in the JSON.  `services`
-     * objects on some firmware revs contain a stray `"name"` field. */
-    const char *info = strstr(body, "\"info\"");
-    const char *scope = info ? info : body;
-
-    bool got_name = false;
-    if (name_out && name_size) {
-        got_name = extract_json_string(scope, "model_name", name_out, name_size);
-    }
-    if (model_number_out) {
-        extract_json_int(scope, "model_number", model_number_out);
-    }
-    if (fw_out && fw_size) {
-        extract_json_string(scope, "firmware_version", fw_out, fw_size);
-    }
-
-    return got_name;
 }
 
 /* ---- Shutter task (priority 7) ------------------------------------------- */

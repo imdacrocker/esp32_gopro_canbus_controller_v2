@@ -226,12 +226,29 @@ Camera model is the single source of truth for all behavioral branching. `camera
 typedef enum {
     CAMERA_MODEL_UNKNOWN           = 0,   /* Unset — invalid for NVS storage            */
 
-    /* GoPro RC-emulation (IDs are project-assigned guesses — no official published spec.
-       Selected manually by the user at pairing time; cannot be read from the camera.)    */
-    CAMERA_MODEL_GOPRO_HERO4_BLACK  = 40,
-    CAMERA_MODEL_GOPRO_HERO4_SILVER = 41,
+    /* GoPro RC-emulation (IDs match GoPro's official `model_number` field as
+       returned by gpControl info JSON; cross-referenced against
+       goprowifihack/CameraCodenames.md.  Hero4-and-newer cameras self-identify
+       via the gpControl probe; Hero3-class is selected manually by the user).  */
+    CAMERA_MODEL_GOPRO_HERO2            = 1,
+    CAMERA_MODEL_GOPRO_HERO3_WHITE      = 2,
+    CAMERA_MODEL_GOPRO_HERO3_SILVER     = 3,
+    CAMERA_MODEL_GOPRO_HERO3_BLACK      = 4,
+    CAMERA_MODEL_GOPRO_HERO3PLUS_SILVER = 10,
+    CAMERA_MODEL_GOPRO_HERO3PLUS_BLACK  = 11,
+    CAMERA_MODEL_GOPRO_HERO4_SILVER     = 12,
+    CAMERA_MODEL_GOPRO_HERO4_BLACK      = 13,
+    CAMERA_MODEL_GOPRO_HEROPLUS_LCD     = 15,
+    CAMERA_MODEL_GOPRO_HERO4_SESSION    = 16,
+    CAMERA_MODEL_GOPRO_HEROPLUS         = 17,
+    CAMERA_MODEL_GOPRO_HERO5_BLACK      = 19,
+    CAMERA_MODEL_GOPRO_HERO5_SESSION    = 21,
+    CAMERA_MODEL_GOPRO_HERO6_BLACK      = 24,
+    CAMERA_MODEL_GOPRO_HERO_2018        = 34,
+    CAMERA_MODEL_GOPRO_HERO_LEGACY_RC   = 999, /* sentinel — gpControl probe failed */
 
     /* GoPro BLE-control (IDs verified against OpenGoPro GetHardwareInfo responses)       */
+    CAMERA_MODEL_GOPRO_HERO7_BLACK  = 30,
     CAMERA_MODEL_GOPRO_HERO9_BLACK  = 55,
     CAMERA_MODEL_GOPRO_HERO10_BLACK = 57,
     CAMERA_MODEL_GOPRO_HERO11_BLACK = 58,
@@ -245,7 +262,7 @@ typedef enum {
 } camera_model_t;
 ```
 
-GoPro RC-emulation IDs are project-assigned and may need updating if official IDs are ever published. GoPro BLE-control IDs are verified against real `GetHardwareInfoRsp` payloads. Future manufacturers use the 1000+ block to avoid collisions.
+GoPro RC-emulation IDs match the official `model_number` field returned by the camera's gpControl info JSON. GoPro BLE-control IDs are verified against real `GetHardwareInfoRsp` payloads. Future manufacturers use the 1000+ block to avoid collisions.
 
 ### 5.2 GoPro capability helpers (`gopro/gopro_model.h`)
 

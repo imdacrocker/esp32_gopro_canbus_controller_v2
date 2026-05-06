@@ -74,6 +74,19 @@ static const uint8_t RC_PKT_SH_STOP[14] = {
     0x00,             /* p=stop */
 };
 
+/* Camera version (cv) request — opcode "cv", 13 bytes.  The camera replies
+ * with a variable-length frame containing length-prefixed firmware-version
+ * and model-name strings (see §17.2.5).  Verified responsive on Hero7 in
+ * Smart-Remote mode; exact firmware/name strings observed:
+ *   "HD7.01.01.90.00" / "HERO7 Black"
+ * The Hero3-era ESP8266 reference includes this opcode but never used it. */
+static const uint8_t RC_PKT_CV[13] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,             /* selector */
+    0x00, 0x00,       /* counter */
+    'c',  'v',
+};
+
 /* ---- Status (`st`) response field offsets (§17.2.4) ---------------------- */
 
 /* All offsets are into a 20-byte response packet. */
@@ -85,13 +98,29 @@ static const uint8_t RC_PKT_SH_STOP[14] = {
 /* Minimum bytes required before parse_st_response indexes b13/b14/b15. */
 #define RC_RESP_MIN_BYTES           16
 
-/* ---- HTTP paths (§17.2.5 / §17.2.6) -------------------------------------- */
+/* ---- `cv` response field offsets (§17.2.5) ------------------------------ *
+ *
+ * Layout decoded from a real Hero7 reply (44 bytes total):
+ *   bytes  0..7   : header (zeros)
+ *   byte   8      : selector echo
+ *   bytes  9..10  : counter echo
+ *   bytes 11..12  : opcode echo ("cv")
+ *   bytes 13..15  : reserved / response-format bytes (0x00 0x03 0x01 observed)
+ *   byte  16      : length of firmware string (uint8)
+ *   bytes 17..    : firmware string (no NUL)
+ *   byte  16+1+fw : length of model-name string (uint8)
+ *   bytes ...     : model-name string (no NUL)
+ *
+ * Strings are not NUL-terminated; the parser must use the length prefixes. */
+#define RC_CV_RESP_FW_LEN_OFFSET    16
 
-/* Identify probe — single GET at pair time. JSON in body has info.model_name,
- * info.model_number, info.firmware_version which we substring-extract. */
-#define RC_HTTP_PATH_IDENTIFY       "/gp/gpControl"
-
-/* Date/time set — printf format takes 6 ints in this order:
+/* ---- HTTP paths (§17.2.6) ----------------------------------------------- *
+ *
+ * Identification is done over UDP (`cv` opcode); HTTP is now used ONLY for
+ * date/time set, and only on cameras whose `gopro_model_supports_http_datetime`
+ * predicate returns true (Hero4 Black/Silver today; tunable per-model).
+ *
+ * Date/time set — printf format takes 6 ints in this order:
  *   year mod 100, month, day, hour, minute, second
  * Each is URL-encoded as %XX where XX is the lowercase hex of the value.
  * Example for 2026-05-04 14:30:00 → "/gp/.../date_time?p=%1a%05%04%0e%1e%00".
@@ -132,15 +161,6 @@ static const uint8_t RC_PKT_SH_STOP[14] = {
 #define RC_SHUTTER_QUEUE_DEPTH      8
 
 /* ---- Response buffer sizes ----------------------------------------------- */
-
-/*
- * Identify response (HTTP GET /gp/gpControl) is several KB of JSON; we only
- * need enough to find the info object's three fields.  The info block is
- * typically near the end of the JSON, so we read enough to be sure we capture
- * it.  4 KB matches what Hero4/5/6/7 emit in practice; tune if logs reveal
- * truncation past the info block.
- */
-#define RC_HTTP_IDENTIFY_RESP_MAX   4096
 
 /* Command-channel HTTP responses (date/time set) are tiny; we don't even read
  * the body — just the status line. */

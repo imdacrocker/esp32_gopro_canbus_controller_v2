@@ -72,8 +72,8 @@ static void rc_work_task(void *arg)
         case RC_CMD_PROMOTE:
             rc_handle_promote(cmd.slot_cmd.slot);
             break;
-        case RC_CMD_HTTP_IDENTIFY:
-            rc_handle_http_identify(cmd.slot_cmd.slot);
+        case RC_CMD_APPLY_CV:
+            rc_handle_apply_cv(cmd.slot_cmd.slot);
             break;
         case RC_CMD_SYNC_TIME_ALL:
             rc_handle_sync_time_all();
@@ -227,12 +227,15 @@ void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip)
      * stays semantically clean. */
     camera_manager_mark_first_pair_complete(slot);
 
-    /* Prime the camera with one keepalive + one status request so it responds
-     * within ms instead of waiting up to 3-5 s for the next scheduled tick.
-     * RX task will post CMD_PROMOTE on the first response, which will fire
-     * the HTTP identify probe to settle the model. */
+    /* Prime the camera with keepalive + status + camera-version so it
+     * responds within ms instead of waiting up to 3-5 s for the next
+     * scheduled tick.  cv gives us model + firmware over UDP — the RX task
+     * decodes it and posts CMD_APPLY_CV.  CMD_PROMOTE fires on the first
+     * response of any kind; if cv has already arrived by then, promote
+     * applies the model directly with no HTTP fallback. */
     rc_send_keepalive(ip);
     rc_send_st(ip);
+    rc_send_cv(ip);
 
     rc_arm_keepalive_timer(ctx);
 

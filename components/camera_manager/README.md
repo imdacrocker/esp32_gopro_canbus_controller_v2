@@ -44,7 +44,7 @@ REQUIRES: bt (ble_addr_t type), nvs_flash, esp_timer, freertos
 Each slot occupies namespace `cam_N` (N = 0–3). Only `camera_manager` writes the `camera` key.
 
 ```
-cam_0/camera   ← camera_nv_record_t (schema version 1)
+cam_0/camera   ← camera_nv_record_t (schema version 3)
 cam_1/camera
 ...
 ```

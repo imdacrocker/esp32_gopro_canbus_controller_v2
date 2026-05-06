@@ -15,8 +15,15 @@ static const char *TAG = "camera_manager";
  * Schema version 2 added the `first_pair_complete` field at the end of the
  * record.  Bumping the version invalidates v1 records on first boot after
  * upgrade — flash must be erased.
+ *
+ * Schema version 3 renumbered camera_model_t entries to match GoPro's
+ * official model_number IDs (HERO4_BLACK 40→13, HERO4_SILVER 41→12,
+ * HERO_LEGACY_RC 39→999) and added Hero2/3/3+/4 Session/5/6/HERO 2018 IDs.
+ * v2 records that store the old HERO4 values would silently decode as
+ * different cameras after the renumber, so the version is bumped to discard
+ * them; users must re-pair.
  */
-#define CAMERA_NV_SCHEMA_VERSION  2
+#define CAMERA_NV_SCHEMA_VERSION  3
 #define NVS_KEY_CAMERA            "camera"
 
 /* Mismatch poll interval (§13.3 default; per-model tuning deferred) */

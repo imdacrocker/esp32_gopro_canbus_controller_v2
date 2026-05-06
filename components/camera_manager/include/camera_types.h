@@ -11,15 +11,31 @@
 typedef enum {
     CAMERA_MODEL_UNKNOWN            = 0,
 
-    /* GoPro RC-emulation (project-assigned IDs).
-     * Hero4 Black / Silver are identified via HTTP `/gp/gpControl` probe at
-     * pair time; HERO_LEGACY_RC is the fallback when the probe fails (camera
-     * has no HTTP server on its STA interface — Hero3/3+ era).  Legacy cameras
-     * speak only the binary UDP RC protocol; HTTP-based commands like
-     * date/time set are not available on them. */
-    CAMERA_MODEL_GOPRO_HERO_LEGACY_RC = 39,
-    CAMERA_MODEL_GOPRO_HERO4_BLACK    = 40,
-    CAMERA_MODEL_GOPRO_HERO4_SILVER   = 41,
+    /* GoPro RC-emulation models — IDs match GoPro's official `model_number`
+     * field as returned by the HTTP `/gp/gpControl` info JSON (cross-referenced
+     * against goprowifihack/CameraCodenames.md).  Hero4-and-newer cameras are
+     * identified via the gpControl probe at pair time; Hero3-class cameras
+     * have no STA-interface HTTP server and must be selected manually.
+     *
+     * HERO_LEGACY_RC is the sentinel fallback when the gpControl probe fails
+     * entirely (Hero3/3+ era) or returns an unrecognised model_name.  It is
+     * placed at 999 to stay out of the way of GoPro's official ID space. */
+    CAMERA_MODEL_GOPRO_HERO2            = 1,   /* HD2.01,  codename "HERO2"        */
+    CAMERA_MODEL_GOPRO_HERO3_WHITE      = 2,   /* HD3.01,  codename "Shores"       */
+    CAMERA_MODEL_GOPRO_HERO3_SILVER     = 3,   /* HD3.02,  codename "Blacks"       */
+    CAMERA_MODEL_GOPRO_HERO3_BLACK      = 4,   /* HD3.03,  codename "Todos"        */
+    CAMERA_MODEL_GOPRO_HERO3PLUS_SILVER = 10,  /* HD3.10,  codename "Uluwatu"      */
+    CAMERA_MODEL_GOPRO_HERO3PLUS_BLACK  = 11,  /* HD3.11,  codename "Bawa"         */
+    CAMERA_MODEL_GOPRO_HERO4_SILVER     = 12,  /* HD4.01,  codename "Backdoor"     */
+    CAMERA_MODEL_GOPRO_HERO4_BLACK      = 13,  /* HD4.02,  codename "Pipe"         */
+    CAMERA_MODEL_GOPRO_HEROPLUS_LCD     = 15,  /* HD3.21,  codename "Haleiwa"      */
+    CAMERA_MODEL_GOPRO_HERO4_SESSION    = 16,  /* HX1.01,  codename "Rocky Point"  */
+    CAMERA_MODEL_GOPRO_HEROPLUS         = 17,  /* HD3.22,  codename "Himalayas"    */
+    CAMERA_MODEL_GOPRO_HERO5_BLACK      = 19,  /* HD5.02,  codename "Streaky"      */
+    CAMERA_MODEL_GOPRO_HERO5_SESSION    = 21,  /* HD5.03,  codename "Margaret River" */
+    CAMERA_MODEL_GOPRO_HERO6_BLACK      = 24,  /* HD6.01,  codename "Chopes"       */
+    CAMERA_MODEL_GOPRO_HERO_2018        = 34,  /* H18.01,  codename "Smoky"        */
+    CAMERA_MODEL_GOPRO_HERO_LEGACY_RC   = 999, /* sentinel — see comment above     */
 
     /* GoPro BLE */
     CAMERA_MODEL_GOPRO_HERO7_BLACK  = 30,

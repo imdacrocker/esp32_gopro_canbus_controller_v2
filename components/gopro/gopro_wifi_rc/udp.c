@@ -73,11 +73,22 @@ esp_err_t rc_udp_init(void)
     }
 
     s_udp_sock = sock;
-    ESP_LOGI(TAG, "UDP socket opened (fd=%d, src/rx port %d)", sock, RC_UDP_RX_PORT);
+    ESP_LOGD(TAG, "UDP socket opened (fd=%d, src/rx port %d)", sock, RC_UDP_RX_PORT);
     return ESP_OK;
 }
 
 /* ---- TX helpers ---------------------------------------------------------- */
+
+/* DEBUG-TRACE: temporary INFO-level logging on every send so we can trace
+ * the legacy-camera protocol on hardware.  Lower to LOGD once stable. */
+static void log_tx(const char *what, uint32_t ip, size_t len)
+{
+    char ip_str[16];
+    ip4_addr_t a = { .addr = ip };
+    ip4addr_ntoa_r(&a, ip_str, sizeof(ip_str));
+    ESP_LOGD(TAG, "TX %s → %s:%d (%u bytes)",
+             what, ip_str, RC_UDP_TX_PORT, (unsigned)len);
+}
 
 static void send_to_camera(uint32_t ip, const void *payload, size_t len)
 {
@@ -88,28 +99,39 @@ static void send_to_camera(uint32_t ip, const void *payload, size_t len)
         .sin_port        = htons(RC_UDP_TX_PORT),
         .sin_addr.s_addr = ip,
     };
-    sendto(s_udp_sock, payload, len, 0,
-           (struct sockaddr *)&dst, sizeof(dst));
+    int sent = sendto(s_udp_sock, payload, len, 0,
+                      (struct sockaddr *)&dst, sizeof(dst));
+    if (sent < 0) {
+        ESP_LOGW(TAG, "sendto failed: errno=%d", errno);
+    }
 }
 
 void rc_send_keepalive(uint32_t ip)
 {
     const char *payload = RC_UDP_KEEPALIVE_PAYLOAD;
-    send_to_camera(ip, payload, strlen(payload));
+    size_t len = strlen(payload);
+    log_tx("keepalive", ip, len);
+    send_to_camera(ip, payload, len);
 }
 
 void rc_send_st(uint32_t ip)
 {
+    log_tx("st", ip, sizeof(RC_PKT_ST));
     send_to_camera(ip, RC_PKT_ST, sizeof(RC_PKT_ST));
 }
 
 void rc_send_sh(uint32_t ip, bool start)
 {
     const uint8_t *pkt = start ? RC_PKT_SH_START : RC_PKT_SH_STOP;
-    /* Both templates are the same length, but use the matching sizeof for
-     * clarity if they ever diverge. */
     size_t len = start ? sizeof(RC_PKT_SH_START) : sizeof(RC_PKT_SH_STOP);
+    log_tx(start ? "SH-start" : "SH-stop", ip, len);
     send_to_camera(ip, pkt, len);
+}
+
+void rc_send_cv(uint32_t ip)
+{
+    log_tx("cv", ip, sizeof(RC_PKT_CV));
+    send_to_camera(ip, RC_PKT_CV, sizeof(RC_PKT_CV));
 }
 
 /* ---- Wake-on-LAN TX ------------------------------------------------------ */
@@ -216,14 +238,40 @@ void rc_udp_rx_task(void *arg)
         if (n <= 0) continue;
 
         uint32_t src_ip = src.sin_addr.s_addr;
+
+        /* DEBUG-TRACE: log every received datagram with source, length, and
+         * a few key bytes (first byte + bytes 11-12 if it's a binary frame).
+         * Lower to LOGD once the legacy protocol is stable on hardware. */
+        char src_str[16];
+        ip4_addr_t src_a = { .addr = src_ip };
+        ip4addr_ntoa_r(&src_a, src_str, sizeof(src_str));
+
+        char opcode_str[8] = "??";
+        if (n >= RC_RESP_OPCODE_OFFSET + 2) {
+            uint8_t o0 = buf[RC_RESP_OPCODE_OFFSET];
+            uint8_t o1 = buf[RC_RESP_OPCODE_OFFSET + 1];
+            if (o0 >= ' ' && o0 < 127 && o1 >= ' ' && o1 < 127) {
+                snprintf(opcode_str, sizeof(opcode_str), "%c%c", o0, o1);
+            } else {
+                snprintf(opcode_str, sizeof(opcode_str), "%02x%02x", o0, o1);
+            }
+        }
+        ESP_LOGD(TAG, "RX %s:%d (%d bytes) first=0x%02x op='%s'",
+                 src_str, ntohs(src.sin_port), n, buf[0], opcode_str);
+
+        /* Hex+ASCII dump at DEBUG so it's available when troubleshooting a
+         * new camera but doesn't spam during normal operation. */
+        ESP_LOG_BUFFER_HEXDUMP(TAG, buf, n, ESP_LOG_DEBUG);
+
         int slot = find_slot_by_ip(src_ip);
         if (slot < 0) {
-            ESP_LOGV(TAG, "RX: %d bytes from unknown source", n);
+            ESP_LOGI(TAG, "  └ unknown source — ignored");
             continue;
         }
 
         /* Keepalive ACK — first byte is `_` (0x5F). */
         if (buf[0] == RC_UDP_KEEPALIVE_ACK_BYTE) {
+            ESP_LOGD(TAG, "  └ slot %d: keepalive ACK", slot);
             on_response_from_slot(slot);
             continue;
         }
@@ -232,12 +280,44 @@ void rc_udp_rx_task(void *arg)
         if (n >= RC_RESP_MIN_BYTES &&
             buf[RC_RESP_OPCODE_OFFSET]     == 's' &&
             buf[RC_RESP_OPCODE_OFFSET + 1] == 't') {
+            ESP_LOGD(TAG, "  └ slot %d: st response (pwr=%u mode=%u state=%u)",
+                     slot,
+                     (unsigned)buf[RC_RESP_PWR_OFFSET],
+                     (unsigned)buf[RC_RESP_MODE_OFFSET],
+                     (unsigned)buf[RC_RESP_STATE_OFFSET]);
             rc_parse_st_response(slot, buf, n);
             on_response_from_slot(slot);
             continue;
         }
 
-        ESP_LOGV(TAG, "RX: unhandled %d-byte datagram (first byte 0x%02x)",
-                 n, buf[0]);
+        /* Shutter ACK echo — opcode "SH" in bytes 11-12, byte 13 echoes our
+         * parameter (0x02 start, 0x00 stop).  Not used to drive state — we
+         * track recording_status from `st` responses — but it IS a liveness
+         * signal worth refreshing last_response_tick on. */
+        if (n >= RC_RESP_OPCODE_OFFSET + 2 &&
+            buf[RC_RESP_OPCODE_OFFSET]     == 'S' &&
+            buf[RC_RESP_OPCODE_OFFSET + 1] == 'H') {
+            ESP_LOGI(TAG, "  └ slot %d: SH ACK (param=0x%02x)",
+                     slot,
+                     n > RC_RESP_OPCODE_OFFSET + 2 ?
+                         (unsigned)buf[RC_RESP_OPCODE_OFFSET + 2] : 0);
+            on_response_from_slot(slot);
+            continue;
+        }
+
+        /* Camera-version response — opcode "cv" in bytes 11-12, variable
+         * length, length-prefixed firmware + model_name strings.  Decoded by
+         * rc_parse_cv_response() in status.c, which posts RC_CMD_APPLY_CV
+         * so the work task applies set_model + set_name + save. */
+        if (n > RC_CV_RESP_FW_LEN_OFFSET &&
+            buf[RC_RESP_OPCODE_OFFSET]     == 'c' &&
+            buf[RC_RESP_OPCODE_OFFSET + 1] == 'v') {
+            ESP_LOGI(TAG, "  └ slot %d: cv response (%d bytes)", slot, n);
+            rc_parse_cv_response(slot, buf, n);
+            on_response_from_slot(slot);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "  └ slot %d: unhandled opcode '%s'", slot, opcode_str);
     }
 }

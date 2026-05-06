@@ -127,11 +127,14 @@ void rc_handle_station_dhcp(const uint8_t mac[6], uint32_t ip)
     memcpy(ctx->mac, mac, 6); /* Keep MAC in sync (also set by driver add flow). */
     camera_manager_save_slot(slot);
 
-    /* Prime the camera with one keepalive + one status request so it responds
-     * within ms instead of waiting for the next scheduled timer tick.  The RX
-     * task will post CMD_PROMOTE on the first response. */
+    /* Prime the camera with keepalive + status + camera-version so it responds
+     * within ms instead of waiting for the next scheduled timer tick.  The cv
+     * response gives us model + firmware over UDP; the RX task posts
+     * CMD_PROMOTE on the first received datagram and CMD_APPLY_CV when cv
+     * specifically arrives. */
     rc_send_keepalive(ip);
     rc_send_st(ip);
+    rc_send_cv(ip);
 
     rc_arm_keepalive_timer(ctx);
 
@@ -163,12 +166,15 @@ void rc_handle_station_disconnected(const uint8_t mac[6])
 
 /*
  * Posted by the UDP RX task when the first datagram arrives from a slot's IP
- * (keepalive ACK or `st` response).  Idempotent — duplicate posts are a no-op
- * because the first one flips wifi_ready.
+ * (keepalive ACK, `st` response, `SH` echo, or `cv` response).  Idempotent —
+ * duplicate posts are a no-op because the first one flips wifi_ready.
  *
- * Triggers the one-shot HTTP identify probe (per session) and the best-effort
- * date/time set.  Neither is on the readiness path; if either fails, the
- * camera is still considered ready.
+ * Identification logic (UDP-only):
+ *   - If a cv response has already been parsed into ctx->parsed_model_name,
+ *     apply it directly.
+ *   - Otherwise send another cv now.  The keepalive tick will keep retrying
+ *     cv every 3 s until a response arrives (some cameras drop the very
+ *     first cv on a fresh pair before the keepalive cycle is established).
  */
 void rc_handle_promote(int slot)
 {
@@ -179,81 +185,48 @@ void rc_handle_promote(int slot)
     camera_manager_on_camera_ready(slot);
     ESP_LOGI(TAG, "slot %d: promoted — camera ready", slot);
 
-    if (!ctx->identify_attempted) {
+    if (!ctx->identify_attempted && ctx->parsed_model_name[0] != '\0') {
         ctx->identify_attempted = true;
-        rc_work_cmd_t cmd = { .type = RC_CMD_HTTP_IDENTIFY,
-                              .slot_cmd = { .slot = slot } };
-        xQueueSend(s_work_queue, &cmd, 0);
+        ESP_LOGI(TAG, "slot %d: cv-identified at promote — model='%s' fw='%s'",
+                 slot, ctx->parsed_model_name, ctx->parsed_firmware);
+        camera_model_t mapped = gopro_model_from_name(ctx->parsed_model_name);
+        camera_manager_set_model(slot, mapped);
+        camera_manager_set_name(slot, ctx->parsed_model_name);
+        camera_manager_save_slot(slot);
+    } else if (!ctx->identify_attempted) {
+        /* cv hasn't arrived yet — kick another one off; keepalive_tick will
+         * keep retrying every 3 s until the camera answers.  No HTTP probe. */
+        rc_send_cv(ctx->last_ip);
     }
 
     /* Date/time is internally gated on gopro_model_supports_http_datetime() —
-     * a no-op on the legacy fallback (HERO_LEGACY_RC). */
+     * a no-op on every model except Hero4 Black/Silver. */
     rc_send_datetime(slot);
 }
 
-/* ---- HTTP identify probe ------------------------------------------------- */
-
-/*
- * One-shot blocking HTTP GET /gp/gpControl, single attempt, RC_HTTP_TIMEOUT_MS
- * timeout.  Runs on the work task; the slot is already wifi_ready by the time
- * we get here, so a 2 s blocking call is acceptable — the RX task continues
- * receiving keepalive ACKs / `st` responses on its own task.
+/* ---- Apply parsed cv data (work task) ------------------------------------ *
  *
- * On success: extract info.model_name / info.model_number / info.firmware_version
- * from the JSON body and persist them to the slot.  Logs all three at INFO so
- * unrecognised models can be added to gopro_model_from_name() over time.
- *
- * On failure (RST, timeout, non-200, parse fail): mark the slot as
- * CAMERA_MODEL_GOPRO_HERO_LEGACY_RC and persist.  Hero3-class cameras don't
- * run an HTTP server on their STA interface — this is the expected legacy path.
+ * Posted by the UDP RX task (rc_parse_cv_response) when a `cv` reply arrives
+ * AFTER promote has already run — typically because the camera's keepalive
+ * ACK reached us before the cv response.  Applies the parsed model name and
+ * firmware to the slot (NVS-persisting), and marks identify_attempted so the
+ * HTTP fallback (if it's still in the work queue) skips on dispatch.
  */
-void rc_handle_http_identify(int slot)
+void rc_handle_apply_cv(int slot)
 {
+    if (slot < 0 || slot >= CAMERA_MAX_SLOTS) return;
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
-    if (ctx->last_ip == 0) {
-        ESP_LOGW(TAG, "slot %d: identify skipped — no IP", slot);
-        return;
-    }
+    if (ctx->parsed_model_name[0] == '\0') return;  /* nothing to apply */
 
-    char *body = malloc(RC_HTTP_IDENTIFY_RESP_MAX);
-    if (!body) {
-        ESP_LOGW(TAG, "slot %d: identify malloc(%d) failed",
-                 slot, RC_HTTP_IDENTIFY_RESP_MAX);
-        return;
-    }
+    camera_model_t mapped = gopro_model_from_name(ctx->parsed_model_name);
+    ESP_LOGI(TAG, "slot %d: applying cv data — model='%s' (enum=%d) fw='%s'",
+             slot, ctx->parsed_model_name, (int)mapped, ctx->parsed_firmware);
 
-    int code = rc_http_get(ctx->last_ip, RC_HTTP_PATH_IDENTIFY,
-                           RC_HTTP_TIMEOUT_MS,
-                           body, RC_HTTP_IDENTIFY_RESP_MAX);
+    camera_manager_set_model(slot, mapped);
+    camera_manager_set_name(slot, ctx->parsed_model_name);
+    camera_manager_save_slot(slot);
 
-    char model_name[32]   = {0};
-    int  model_number     = -1;
-    char firmware[32]     = {0};
-
-    bool parsed = (code == 200) &&
-                  rc_parse_identify_json(body,
-                                          model_name,   sizeof(model_name),
-                                          &model_number,
-                                          firmware,     sizeof(firmware));
-
-    if (parsed) {
-        ESP_LOGI(TAG, "slot %d: identify OK — model='%s' model_num=%d fw='%s'",
-                 slot, model_name, model_number, firmware);
-
-        camera_model_t mapped = gopro_model_from_name(model_name);
-        camera_manager_set_model(slot, mapped);
-        if (model_name[0] != '\0') {
-            camera_manager_set_name(slot, model_name);
-        }
-        camera_manager_save_slot(slot);
-    } else {
-        ESP_LOGI(TAG, "slot %d: identify failed (code=%d) — legacy RC camera",
-                 slot, code);
-        camera_manager_set_model(slot, CAMERA_MODEL_GOPRO_HERO_LEGACY_RC);
-        camera_manager_save_slot(slot);
-    }
-
-    free(body);
+    ctx->identify_attempted = true;
 }
 
 /* ---- Keepalive tick handler ---------------------------------------------- */
@@ -263,12 +236,22 @@ void rc_handle_http_identify(int slot)
  * window: if no UDP datagram (ACK or `st` response) has arrived from the camera
  * for RC_KEEPALIVE_SILENCE_MS, arm the WoL retry timer.  When traffic resumes
  * the RX task refreshes last_response_tick and the next tick disarms the timer.
+ *
+ * Also re-send `cv` on every tick until identify_attempted flips true — the
+ * camera reliably ignores the very first cv on a fresh pair (it arrives
+ * before the RC pairing has fully settled), so we keep nudging it once per
+ * keepalive cycle.  apply_cv flips identify_attempted when a cv response
+ * lands, terminating the retries.
  */
 void rc_handle_keepalive_tick(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
 
     rc_send_keepalive(ctx->last_ip);
+
+    if (!ctx->identify_attempted) {
+        rc_send_cv(ctx->last_ip);
+    }
 
     TickType_t now     = xTaskGetTickCount();
     TickType_t silence = now - ctx->last_response_tick;

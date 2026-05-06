@@ -22,9 +22,22 @@
 /** True if the model is any known GoPro camera (RC-emulation or BLE-control). */
 static inline bool gopro_model_is_gopro(camera_model_t model)
 {
-    return model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC
-        || model == CAMERA_MODEL_GOPRO_HERO4_BLACK
+    return model == CAMERA_MODEL_GOPRO_HERO2
+        || model == CAMERA_MODEL_GOPRO_HERO3_WHITE
+        || model == CAMERA_MODEL_GOPRO_HERO3_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO3_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO3PLUS_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO3PLUS_BLACK
+        || model == CAMERA_MODEL_GOPRO_HEROPLUS_LCD
+        || model == CAMERA_MODEL_GOPRO_HEROPLUS
         || model == CAMERA_MODEL_GOPRO_HERO4_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO4_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO4_SESSION
+        || model == CAMERA_MODEL_GOPRO_HERO5_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO5_SESSION
+        || model == CAMERA_MODEL_GOPRO_HERO6_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO_2018
+        || model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC
         || model == CAMERA_MODEL_GOPRO_HERO7_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO9_BLACK
         || model == CAMERA_MODEL_GOPRO_HERO10_BLACK
@@ -36,32 +49,51 @@ static inline bool gopro_model_is_gopro(camera_model_t model)
         || model == CAMERA_MODEL_GOPRO_LIT_HERO;
 }
 
-/** Camera connects by emulating a GoPro WiFi Remote AP. */
+/**
+ * Camera connects by emulating a GoPro WiFi Remote AP.
+ *
+ * Hero2 through Hero7 (and likely Hero8, untested) all accept the original
+ * Smart Remote pairing flow as a STA on our SoftAP.  Hero4 onwards in this
+ * mode also reply to the binary UDP `cv` (camera version) opcode with a
+ * length-prefixed firmware + model_name payload — that's how we identify the
+ * specific model without HTTP.  Hero7 is shared with the BLE block in
+ * `uses_ble_control` because it's identified by the same enum value
+ * regardless of pairing path; the WiFi RC driver registers first in main.c
+ * boot order, so a Hero7 paired via the SoftAP picks up the RC driver
+ * (BLE Hero7 is frozen anyway — see `gopro_model_is_frozen`).
+ */
 static inline bool gopro_model_uses_rc_emulation(camera_model_t model)
 {
-    return model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC
+    return model == CAMERA_MODEL_GOPRO_HERO2
+        || model == CAMERA_MODEL_GOPRO_HERO3_WHITE
+        || model == CAMERA_MODEL_GOPRO_HERO3_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO3_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO3PLUS_SILVER
+        || model == CAMERA_MODEL_GOPRO_HERO3PLUS_BLACK
+        || model == CAMERA_MODEL_GOPRO_HEROPLUS_LCD
+        || model == CAMERA_MODEL_GOPRO_HEROPLUS
+        || model == CAMERA_MODEL_GOPRO_HERO4_SILVER
         || model == CAMERA_MODEL_GOPRO_HERO4_BLACK
-        || model == CAMERA_MODEL_GOPRO_HERO4_SILVER;
+        || model == CAMERA_MODEL_GOPRO_HERO4_SESSION
+        || model == CAMERA_MODEL_GOPRO_HERO5_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO5_SESSION
+        || model == CAMERA_MODEL_GOPRO_HERO6_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO7_BLACK
+        || model == CAMERA_MODEL_GOPRO_HERO_2018
+        || model == CAMERA_MODEL_GOPRO_HERO_LEGACY_RC;
 }
 
 /**
- * Camera responds to HTTP commands on its STA-interface IP.
+ * Camera accepts the HTTP/1.0 `setup/date_time` command on its STA-interface
+ * IP.  This is the only HTTP path we use today — identification is done over
+ * UDP (`cv` opcode) for all cameras, so this predicate purely gates
+ * `rc_send_datetime()`.
  *
- * Hero4 onwards run an HTTP server on whatever DHCP-assigned IP they get from
- * an external SoftAP, so we can issue gpControl GETs (status, date_time,
- * shutter — though we use UDP for shutter for latency).
- *
- * Hero3-class cameras (CAMERA_MODEL_GOPRO_HERO_LEGACY_RC) do not — port 80
- * RSTs immediately on the STA interface — so HTTP-only commands (notably
- * date/time set) silently skip on those slots.
- *
- * The model is established at pair time by the HTTP `/gp/gpControl` identify
- * probe (see camera_manager_design.md §17.5); this predicate is the gating
- * check used by `rc_send_datetime`.
- *
- * Add Hero5/6/7/etc once their STA-mode HTTP behaviour is verified on
- * hardware — model_number values from the JSON info block are logged at
- * pair time for that purpose.
+ * Hero4 Black/Silver in Smart-Remote mode are confirmed working (Lua trace).
+ * Hero7 in Smart-Remote mode silently drops port-80 SYNs (verified via probe
+ * diagnostic), so it stays out of this list.  Hero3-class never had STA-side
+ * HTTP at all.  Add Hero4 Session / Hero5 / Hero6 / HERO 2018 once verified
+ * on hardware.
  */
 static inline bool gopro_model_supports_http_datetime(camera_model_t model)
 {
@@ -70,11 +102,13 @@ static inline bool gopro_model_supports_http_datetime(camera_model_t model)
 }
 
 /**
- * Map a `model_name` string from the HTTP `/gp/gpControl` info JSON to a
+ * Map a `model_name` string from the camera's UDP `cv` response (or, on
+ * Hero4-class, the gpControl JSON if we ever re-enable that path) to a
  * `camera_model_t` enum value.  Returns CAMERA_MODEL_GOPRO_HERO_LEGACY_RC for
- * an unrecognised name (camera responded to gpControl but its model isn't yet
- * in the enum — let it run on the legacy path until the mapping is added).
- * Returns CAMERA_MODEL_UNKNOWN only when `name == NULL`.
+ * an unrecognised name — slot still runs on the UDP-only path; the mapping
+ * can be added once the actual reported string is observed (logged at INFO
+ * by rc_parse_cv_response).  Returns CAMERA_MODEL_UNKNOWN only when name is
+ * NULL.
  *
  * Implementation lives in `gopro_model.c` — string-compare table is too long
  * to keep inline.

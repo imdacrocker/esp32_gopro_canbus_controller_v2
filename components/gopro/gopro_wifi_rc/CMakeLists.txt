@@ -6,6 +6,7 @@ idf_component_register(
         "status.c"
         "udp.c"
         "settings.c"
+        "diagnostic.c"
         "../gopro_model.c"
     INCLUDE_DIRS
         "include"
@@ -20,4 +21,5 @@ idf_component_register(
         freertos
         lwip
         esp_wifi
+        esp_netif
 )

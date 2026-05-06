@@ -17,37 +17,34 @@
 #include "gopro_model.h"
 
 /*
- * model_name → camera_model_t.  Strings are case-sensitive.
+ * model_name → camera_model_t.  Strings are case-sensitive and must match the
+ * exact `info.model_name` value emitted by the camera's gpControl JSON.
  *
- * Hero5/6/7/8 models that respond to /gp/gpControl will land in the legacy
- * fallback until their model_name strings are confirmed against real
- * hardware and added below — the wifi_rc identify handler logs every
- * unrecognised model_name + model_number it sees, so the table can be
- * extended without further hardware testing for those known values.
+ * Hero4 Black / Silver are verified against goprowifihack/HERO4/gpControl-*.
+ * The remaining strings are taken from goprowifihack/CameraCodenames.md and
+ * the matching gpControl-*.json reference dumps; if the actual camera reports
+ * a different string the lookup falls through to LEGACY_RC and the
+ * unrecognised model_name + model_number is logged at INFO so this table can
+ * be corrected.  Wrong strings are therefore harmless.
+ *
+ * Hero3-class cameras (HERO2 through HERO+) are intentionally absent: they
+ * have no HTTP server on the STA interface, so this lookup is never reached
+ * for them.
  */
 static const struct {
     const char    *name;
     camera_model_t model;
 } k_model_table[] = {
-    /* Verified against goprowifihack/HERO4/gpControl-Hero4*.json:
-     *   HERO4 Black  → model_number 13
-     *   HERO4 Silver → model_number 12 */
-    { "HERO4 Black",  CAMERA_MODEL_GOPRO_HERO4_BLACK  },
-    { "HERO4 Silver", CAMERA_MODEL_GOPRO_HERO4_SILVER },
-
-    /* TODO(§17.13): add Hero5+ entries as their model_name strings are
-     * observed at pair time on real hardware.  Reference values from
-     * goprowifihack/CameraCodenames.md and gpControl-*.json:
-     *   "HERO4 Session" → 16
-     *   "HERO5 Black"   → 19
-     *   "HERO5 Session" → 21
-     *   "HERO6 Black"   → 24
-     *   "HERO7 Black"   → ?  (HERO7 is currently a BLE-control model in
-     *                          camera_types.h; if Hero7 in RC mode also
-     *                          identifies via gpControl, a separate
-     *                          enumeration may be needed)
-     *   "HERO+",        "HERO+ LCD", "HERO 2018"
-     */
+    { "HERO4 Black",   CAMERA_MODEL_GOPRO_HERO4_BLACK   },
+    { "HERO4 Silver",  CAMERA_MODEL_GOPRO_HERO4_SILVER  },
+    { "HERO4 Session", CAMERA_MODEL_GOPRO_HERO4_SESSION },
+    { "HERO5 Black",   CAMERA_MODEL_GOPRO_HERO5_BLACK   },
+    { "HERO5 Session", CAMERA_MODEL_GOPRO_HERO5_SESSION },
+    { "HERO6 Black",   CAMERA_MODEL_GOPRO_HERO6_BLACK   },
+    /* "HERO7 Black" verified against a real Hero7 (firmware HD7.01.01.90.00):
+     * UDP `cv` reply byte 32 onwards = 0x0b "HERO7 Black". */
+    { "HERO7 Black",   CAMERA_MODEL_GOPRO_HERO7_BLACK   },
+    { "HERO 2018",     CAMERA_MODEL_GOPRO_HERO_2018     },
 };
 
 camera_model_t gopro_model_from_name(const char *model_name)
@@ -60,9 +57,9 @@ camera_model_t gopro_model_from_name(const char *model_name)
         }
     }
 
-    /* Camera responded to gpControl (so HTTP works) but the name isn't in
-     * our table yet.  Falling back to the legacy enum is conservative — the
-     * caller (rc_handle_http_identify) will have logged the model_name and
-     * model_number at INFO so the table can be extended later. */
+    /* Camera responded to UDP `cv` but its model_name isn't in our table.
+     * Falling back to the legacy enum is conservative — rc_parse_cv_response
+     * already logged the model_name + firmware at INFO so the table can be
+     * extended later. */
     return CAMERA_MODEL_GOPRO_HERO_LEGACY_RC;
 }
