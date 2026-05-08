@@ -21,8 +21,8 @@ typedef struct {
     uint32_t                   last_ip;          /* network byte order */
     camera_recording_status_t  recording_status; /* cache updated by RX task */
     bool                       wifi_ready;
-    bool                       identify_attempted; /* identification path picked this session
-                                                      (cv-direct OR HTTP probe queued) */
+    bool                       identify_attempted; /* set true once cv has been parsed
+                                                      and applied; gates cv-retry on tick */
     /* Populated by the UDP RX task on receipt of a `cv` response.  Read by
      * the work task (handle_apply_cv / handle_promote / handle_http_identify)
      * to apply the model+name and skip the HTTP fallback when cv has already
@@ -59,7 +59,7 @@ typedef struct {
         struct { uint8_t mac[6]; }              mac_only; /* ASSOCIATED, DISCONNECTED */
         struct { uint8_t mac[6]; uint32_t ip; } mac_ip;   /* DHCP */
         struct { int slot; }                    slot_cmd; /* KEEPALIVE_TICK, WOL_RETRY,
-                                                             PROMOTE, HTTP_IDENTIFY */
+                                                             PROMOTE, APPLY_CV */
     };
 } rc_work_cmd_t;
 

@@ -96,8 +96,11 @@ static esp_err_t handler_rc_discovered(httpd_req_t *req)
  * POST /api/rc/add
  * Body: { "addr": "XX:XX:XX:XX:XX:XX", "ip": "10.71.79.X" }
  *
- * Registers the station as an RC-emulation camera and triggers an HTTP probe.
- * The MAC must already be associated with the SoftAP (have a DHCP lease).
+ * Registers the station as an RC-emulation camera (initial model =
+ * HERO_LEGACY_RC) and primes it with a UDP keepalive + `st` + `cv` burst.
+ * The camera's `cv` reply (when it arrives) settles the actual model and
+ * display name.  The MAC must already be associated with the SoftAP (have
+ * a DHCP lease).
  */
 static esp_err_t handler_rc_add(httpd_req_t *req)
 {

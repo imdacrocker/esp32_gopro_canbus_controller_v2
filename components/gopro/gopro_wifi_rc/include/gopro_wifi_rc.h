@@ -1,11 +1,16 @@
 /*
  * gopro_wifi_rc.h — Public API for the GoPro WiFi Remote emulation driver.
  *
- * Implements camera_driver_t for Hero4 Black and Hero4 Silver cameras.
- * These cameras connect to the SoftAP automatically when they see the correct
- * SSID (HERO-RC-XXXXXX) and OUI (d8:96:85) — both configured by wifi_manager.
- * Recording commands travel over UDP (keepalive) and plain HTTP/1.0 (shutter,
- * status, date/time).  No BLE is used.
+ * Implements camera_driver_t for Hero3 / Hero3+ / Hero4 / Hero5 / Hero6 / Hero7
+ * cameras in their "Smart Remote" mode.  Cameras connect to the SoftAP
+ * automatically when they see the correct SSID (HERO-RC-XXXXXX) and OUI
+ * (d8:96:85) — both configured by wifi_manager.
+ *
+ * Every recurring exchange — keepalive, status, shutter, identify — is a
+ * short binary UDP datagram (local port 8383, remote 8484).  HTTP/1.0 is
+ * used only for the optional date/time set on cameras for which
+ * gopro_model_supports_http_datetime() returns true (Hero4 Black/Silver
+ * today).  No BLE is used.
  *
  * §17 of camera_manager_design.md.
  */
@@ -36,12 +41,16 @@ void gopro_wifi_rc_on_station_disassociated(const uint8_t mac[6]);
 /* ---- Manual add from web UI (POST /api/rc/add) --------------------------- */
 
 /*
- * Register mac as a new RC-emulation camera, seed it with ip, and trigger an
- * HTTP probe.  Called by http_server; mac must already be associated to the
- * SoftAP with a valid DHCP lease.
+ * Register mac as a new RC-emulation camera, seed it with ip, and prime the
+ * camera with a keepalive + `st` + `cv` UDP burst.  Called by http_server;
+ * mac must already be associated to the SoftAP with a valid DHCP lease.
  *
- * Defaults model to CAMERA_MODEL_GOPRO_HERO4_BLACK — model picker in the web
- * UI is a future TODO (web_ui_spec.md §17).
+ * Slot is registered with model = CAMERA_MODEL_GOPRO_HERO_LEGACY_RC; the
+ * camera's `cv` response (parsed asynchronously by the RX task) upgrades
+ * this to the specific Hero4 / Hero7 / etc. model and persists the display
+ * name.  If the camera never answers `cv`, the slot stays at LEGACY_RC and
+ * UDP control still works — only the model name and HTTP-datetime
+ * capability check are missing.
  */
 void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip);
 
@@ -70,7 +79,7 @@ bool gopro_wifi_rc_is_managed_mac(const uint8_t mac[6]);
  */
 void gopro_wifi_rc_sync_time_all(void);
 
-/* ---- DIAGNOSTIC (temporary) ---------------------------------------------- *
+/* ---- DIAGNOSTIC (dev-only — not currently dispatched) ------------------- *
  *
  * Spawn a one-shot task that runs a battery of network probes against the
  * camera at (mac, ip) and logs the results to the serial console:
@@ -81,8 +90,10 @@ void gopro_wifi_rc_sync_time_all(void);
  *   - Extra UDP opcode probes (`cv` GET-form 0/1, `wt`); replies are logged
  *     by the existing rc_udp_rx_task
  *
- * While this is wired in, the /api/rc/add web endpoint dispatches here
- * INSTEAD of the normal pair flow.  Revert by swapping the call back to
- * gopro_wifi_rc_add_camera() in components/http_server/api_rc.c.
+ * Used in 2026-05 to confirm Hero7's STA-mode behaviour (all TCP closed,
+ * UDP `cv` works) which led to the cv-based identify path replacing HTTP.
+ * Kept compiled-in for future hardware investigations; to wire it back to
+ * the /api/rc/add endpoint, swap gopro_wifi_rc_add_camera() for
+ * gopro_wifi_rc_diagnose() in components/http_server/api_rc.c.
  */
 void gopro_wifi_rc_diagnose(const uint8_t mac[6], uint32_t ip);

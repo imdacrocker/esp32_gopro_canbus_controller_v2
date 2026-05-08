@@ -13,13 +13,14 @@ typedef enum {
 
     /* GoPro RC-emulation models — IDs match GoPro's official `model_number`
      * field as returned by the HTTP `/gp/gpControl` info JSON (cross-referenced
-     * against goprowifihack/CameraCodenames.md).  Hero4-and-newer cameras are
-     * identified via the gpControl probe at pair time; Hero3-class cameras
-     * have no STA-interface HTTP server and must be selected manually.
+     * against goprowifihack/CameraCodenames.md).  Cameras self-identify via
+     * the UDP `cv` opcode at pair time (see camera_manager_design.md §17.2.5);
+     * the camera's reported `model_name` string maps to one of these enum
+     * values via gopro_model_from_name().
      *
-     * HERO_LEGACY_RC is the sentinel fallback when the gpControl probe fails
-     * entirely (Hero3/3+ era) or returns an unrecognised model_name.  It is
-     * placed at 999 to stay out of the way of GoPro's official ID space. */
+     * HERO_LEGACY_RC is the sentinel fallback when the cv probe never gets
+     * a reply or returns an unrecognised model_name.  It is placed at 999
+     * to stay out of the way of GoPro's official ID space. */
     CAMERA_MODEL_GOPRO_HERO2            = 1,   /* HD2.01,  codename "HERO2"        */
     CAMERA_MODEL_GOPRO_HERO3_WHITE      = 2,   /* HD3.01,  codename "Shores"       */
     CAMERA_MODEL_GOPRO_HERO3_SILVER     = 3,   /* HD3.02,  codename "Blacks"       */

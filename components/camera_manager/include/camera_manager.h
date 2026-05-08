@@ -125,7 +125,8 @@ void camera_manager_set_name(int slot, const char *name);
  * (the enum name is retained for both transports) and starts the per-slot
  * mismatch poll timer.
  *
- * For RC-emulation cameras this is called after the HTTP probe succeeds.
+ * For RC-emulation cameras this is called on the first received UDP
+ * datagram from the camera (keepalive ACK, `st`, `SH`, or `cv` reply).
  * For BLE-control cameras this is called after GetHardwareInfo +
  * SetCameraControlStatus complete.
  */

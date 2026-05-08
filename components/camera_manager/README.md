@@ -117,7 +117,7 @@ camera_manager_on_ble_ready(slot)                   → CAM_BLE_READY
 camera_manager_on_camera_ready(slot)                 → WIFI_CAM_READY + start mismatch timer
   (called by the driver after its readiness sequence completes —
    for BLE-control: GetHardwareInfo + SetCameraControlStatus;
-   for RC-emulation: HTTP probe success.)
+   for RC-emulation: first UDP datagram received from the camera.)
 
 camera_manager_on_wifi_disconnected(slot)            → WIFI_CAM_NONE  + stop mismatch timer
   (RC-emulation only — BLE-control cameras use BLE link supervision instead.)
@@ -210,7 +210,7 @@ void camera_manager_on_station_ip(const uint8_t mac[6], uint32_t ip);
 `on_camera_ready` sets `WIFI_CAM_READY` and starts the mismatch poll timer. Called by the driver after its own readiness sequence completes:
 
 - **BLE-control**: after `GetHardwareInfo` returns success and `SetCameraControlStatus(EXTERNAL)` is acked (or its 3 s timeout fires).
-- **RC-emulation**: after the HTTP probe to `/gp/gpControl/status` returns 200.
+- **RC-emulation**: on the first UDP datagram received from the camera (keepalive ACK, `st`, `SH`, or `cv` reply).  Identification (model + display name) is settled separately and asynchronously by the `cv` response — see `gopro_wifi_rc/README.md` for details.
 
 `on_wifi_disconnected` stops the timer and resets `wifi_status` to `WIFI_CAM_NONE`. RC-emulation only — BLE-control cameras don't use the SoftAP, so connection loss surfaces as a BLE disconnect instead.
 
