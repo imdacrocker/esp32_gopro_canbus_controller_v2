@@ -62,12 +62,13 @@ typedef struct {
 
 /* ---- Pair-attempt info exposed via /api/pair/status ---- */
 typedef struct {
-    pair_attempt_state_t  state;
-    uint8_t               addr[6];
-    uint8_t               addr_type;
-    camera_model_t        model;          /* CAMERA_MODEL_UNKNOWN until known */
-    pair_attempt_error_t  error_code;
-    char                  error_message[64];
+    pair_attempt_state_t      state;
+    pair_attempt_transport_t  transport;
+    uint8_t                   addr[6];
+    uint8_t                   addr_type;     /* BLE only — 0 for RC */
+    camera_model_t            model;         /* CAMERA_MODEL_UNKNOWN until known */
+    pair_attempt_error_t      error_code;
+    char                      error_message[64];
 } pair_attempt_info_t;
 
 /* ---- CAN camera state (§14.2) ---- */
@@ -240,8 +241,22 @@ esp_err_t camera_manager_mark_first_pair_complete(int slot);
 /* Begin a new pair attempt.
  *
  * Returns ESP_OK on success.  Returns ESP_ERR_INVALID_STATE if a non-terminal
- * attempt is already in flight (caller should respond with HTTP 409). */
-esp_err_t pair_attempt_begin(const uint8_t addr[6], uint8_t addr_type);
+ * attempt is already in flight (caller should respond with HTTP 409).
+ *
+ * transport selects the cleanup path used by pair_attempt_cancel():
+ *   - PAIR_TRANSPORT_BLE: ble_gap_conn_cancel + ble_gap_terminate; remove slot
+ *     only if it was registered during PROVISIONING and never reached
+ *     first_pair_complete.
+ *   - PAIR_TRANSPORT_WIFI_RC: remove the registered slot by MAC (RC slots are
+ *     committed at register time, so the cleanup path is unconditional).
+ *   addr_type is BLE-specific; pass 0 for RC. */
+esp_err_t pair_attempt_begin(const uint8_t addr[6], uint8_t addr_type,
+                              pair_attempt_transport_t transport);
+
+/* True if a non-terminal pair attempt is in flight and its target address
+ * matches addr.  Drivers use this to decide whether to drive the state
+ * machine for a given camera (vs. a normal reconnect). */
+bool pair_attempt_addr_matches(const uint8_t addr[6]);
 
 /* Driver-side transitions.  All forward-only and idempotent — calling
  * advance() with the current or an earlier state is a no-op.  fail() only

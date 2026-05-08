@@ -253,6 +253,13 @@ void gopro_wifi_rc_add_camera(const uint8_t mac[6], uint32_t ip)
     int slot = camera_manager_register_new(mac);
     if (slot < 0) {
         ESP_LOGE(TAG, "add_camera: no free slots");
+        /* If a pair attempt is in flight for this MAC (web UI Add flow),
+         * fail it so the modal surfaces "All slots in use" instead of
+         * spinning until the watchdog fires. */
+        if (pair_attempt_addr_matches(mac)) {
+            pair_attempt_fail(PAIR_ERROR_SLOTS_FULL,
+                              "All camera slots are in use");
+        }
         return;
     }
     /* Register as the legacy/unidentified RC fallback.  The UDP `cv`

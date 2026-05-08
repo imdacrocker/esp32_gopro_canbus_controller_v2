@@ -40,18 +40,6 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
     return 0;
 }
 
-/* True if the in-flight pair attempt targets this address. */
-static bool pair_attempt_addr_matches(const uint8_t addr[6])
-{
-    pair_attempt_info_t info;
-    pair_attempt_get(&info);
-    if (info.state == PAIR_ATTEMPT_IDLE) return false;
-    if (info.state == PAIR_ATTEMPT_SUCCESS || info.state == PAIR_ATTEMPT_FAILED) {
-        return false;
-    }
-    return memcmp(info.addr, addr, 6) == 0;
-}
-
 /* ---- on_connected -------------------------------------------------------- */
 
 void gopro_on_connected(uint16_t conn_handle, ble_addr_t addr)

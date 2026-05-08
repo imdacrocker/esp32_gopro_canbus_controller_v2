@@ -703,7 +703,7 @@ function renderRcDiscovered(devices) {
     });
 }
 
-document.getElementById('rc-results').addEventListener('click', e => {
+document.getElementById('rc-results').addEventListener('click', async e => {
     const btn = e.target.closest('.pair-this-btn');
     if (!btn) return;
     const addr = btn.dataset.addr;
@@ -714,32 +714,19 @@ document.getElementById('rc-results').addEventListener('click', e => {
         return;
     }
 
-    setModalStatus(`Probing device ${addr}… (up to 15 s)`);
-    btn.disabled = true;
-    document.getElementById('rc-add-btn').disabled = true;
+    /* Same UX as the BLE pair flow — open the pair-progress modal, kick off
+     * the add, then poll /api/pair/status for the shared state machine.
+     * Success auto-dismisses; failure shows the error and an OK button. */
+    document.getElementById('rc-results').innerHTML = '';
 
-    apiFetch('POST', '/api/rc/add', { addr, ip })
-        .then(() => {
-            setTimeout(() => {
-                apiFetch('GET', '/api/rc/discovered').then(devices => {
-                    const stillThere = devices.find(d => d.addr === addr);
-                    if (stillThere) {
-                        setModalStatus(`⚠️ Could not identify ${addr} as a GoPro camera.`);
-                    } else {
-                        setModalStatus('✅ Camera added — it will appear in the camera list shortly.');
-                    }
-                    renderRcDiscovered(devices);
-                    document.getElementById('rc-add-btn').disabled = false;
-                    refreshModalPairedCameras();
-                }).catch(() => {
-                    document.getElementById('rc-add-btn').disabled = false;
-                });
-            }, 15000);
-        })
-        .catch(() => {
-            setModalStatus('Add request failed.');
-            document.getElementById('rc-add-btn').disabled = false;
-        });
+    openPairModal();
+    try {
+        await apiFetch('POST', '/api/rc/add', { addr, ip });
+    } catch (err) {
+        showPairModalFailure(err.message || 'Add request failed.');
+        return;
+    }
+    startPairStatusPoll();
 });
 
 /* ---- Paired cameras list in modal ---------------------------------------- */

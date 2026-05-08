@@ -13,6 +13,7 @@
 #include "cJSON.h"
 #include "wifi_manager.h"
 #include "gopro_wifi_rc.h"
+#include "camera_manager.h"
 #include "http_server_internal.h"
 
 static const char *TAG = "http_api_rc";
@@ -134,6 +135,19 @@ static esp_err_t handler_rc_add(httpd_req_t *req)
 
     if (ip == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid ip");
+        return ESP_FAIL;
+    }
+
+    /* Reserve the pair-attempt state machine (shared with the BLE pair flow)
+     * so the web UI can poll /api/pair/status for "Connecting / Success /
+     * Failed" updates and so the watchdog removes the slot if the camera
+     * never responds to UDP.  If a previous attempt is still in flight,
+     * refuse with 409. */
+    esp_err_t err = pair_attempt_begin(mac, 0, PAIR_TRANSPORT_WIFI_RC);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"pair already in flight\"}");
         return ESP_FAIL;
     }
 

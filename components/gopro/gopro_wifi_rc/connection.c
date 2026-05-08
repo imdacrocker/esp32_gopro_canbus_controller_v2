@@ -186,6 +186,8 @@ void rc_handle_promote(int slot)
     camera_manager_on_camera_ready(slot);
     ESP_LOGI(TAG, "slot %d: promoted — camera ready", slot);
 
+    bool active_pair = pair_attempt_addr_matches(ctx->mac);
+
     if (!ctx->identify_attempted && ctx->parsed_model_name[0] != '\0') {
         ctx->identify_attempted = true;
         ESP_LOGI(TAG, "slot %d: cv-identified at promote — model='%s' fw='%s'",
@@ -193,10 +195,21 @@ void rc_handle_promote(int slot)
         camera_model_t mapped = gopro_model_from_name(ctx->parsed_model_name);
         camera_manager_set_model(slot, mapped);
         camera_manager_save_slot(slot);
+        if (active_pair) pair_attempt_set_model(mapped);
     } else if (!ctx->identify_attempted) {
         /* cv hasn't arrived yet — kick another one off; keepalive_tick will
          * keep retrying every 3 s until the camera answers.  No HTTP probe. */
         rc_send_cv(ctx->last_ip);
+    }
+
+    /* For the web-UI Add flow: any UDP response from the camera proves it's
+     * a working RC GoPro, so promote = pair success.  If cv arrives later,
+     * apply_cv will upgrade the model on the camera_manager side; the modal
+     * is already closed by then, so set_model on the (terminal) pair_attempt
+     * is a no-op — the home-screen card picks up the upgraded model on its
+     * next refresh. */
+    if (active_pair) {
+        pair_attempt_advance(PAIR_ATTEMPT_SUCCESS);
     }
 
     /* Date/time is internally gated on gopro_model_supports_http_datetime() —
@@ -229,6 +242,15 @@ void rc_handle_apply_cv(int slot)
     camera_manager_save_slot(slot);
 
     ctx->identify_attempted = true;
+
+    /* If a pair attempt is in flight for this MAC, surface the resolved
+     * model in the status before promote (or in addition to it).  set_model
+     * is a no-op once the state is terminal (e.g. promote already advanced
+     * to SUCCESS), so this is safe regardless of ordering. */
+    if (pair_attempt_addr_matches(ctx->mac)) {
+        pair_attempt_set_model(mapped);
+        pair_attempt_advance(PAIR_ATTEMPT_SUCCESS);
+    }
 }
 
 /* ---- Keepalive tick handler ---------------------------------------------- */

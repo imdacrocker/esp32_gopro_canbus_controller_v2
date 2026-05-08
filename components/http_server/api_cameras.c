@@ -426,7 +426,8 @@ static esp_err_t handler_pair(httpd_req_t *req)
     /* Reserve the pair-attempt state machine before kicking off BLE work.
      * If a previous attempt is still in flight, refuse with 409 — the UI is
      * expected to wait for the previous attempt to reach a terminal state. */
-    esp_err_t err = pair_attempt_begin(ble_addr.val, ble_addr.type);
+    esp_err_t err = pair_attempt_begin(ble_addr.val, ble_addr.type,
+                                        PAIR_TRANSPORT_BLE);
     if (err == ESP_ERR_INVALID_STATE) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "application/json");
@@ -442,6 +443,15 @@ static esp_err_t handler_pair(httpd_req_t *req)
 
 /* ---- GET /api/pair/status ----------------------------------------------- */
 
+static const char *pair_transport_str(pair_attempt_transport_t t)
+{
+    switch (t) {
+    case PAIR_TRANSPORT_WIFI_RC: return "wifi_rc";
+    case PAIR_TRANSPORT_BLE:
+    default:                     return "ble";
+    }
+}
+
 static esp_err_t handler_pair_status(httpd_req_t *req)
 {
     pair_attempt_info_t info;
@@ -450,10 +460,11 @@ static esp_err_t handler_pair_status(httpd_req_t *req)
     char addr_str[18];
     format_mac(addr_str, info.addr);
 
-    char buf[320];
+    char buf[360];
     int n = snprintf(buf, sizeof(buf),
         "{"
         "\"state\":\"%s\","
+        "\"transport\":\"%s\","
         "\"addr\":\"%s\","
         "\"addr_type\":%u,"
         "\"model\":%d,"
@@ -462,6 +473,7 @@ static esp_err_t handler_pair_status(httpd_req_t *req)
         "\"error_message\":\"%s\""
         "}",
         pair_state_str(info.state),
+        pair_transport_str(info.transport),
         addr_str,
         info.addr_type,
         (int)info.model,

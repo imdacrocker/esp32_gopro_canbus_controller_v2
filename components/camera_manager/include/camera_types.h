@@ -91,11 +91,24 @@ typedef enum {
     MISMATCH_ACTION_STOP  = 2,
 } mismatch_action_t;
 
-/* ---- Pair-attempt state machine (BLE add-camera flow) ---- */
+/* ---- Pair-attempt transport (which add-camera flow is in flight) ---- *
+ *
+ * The pair_attempt state machine is shared between the BLE add-camera flow
+ * (handler_pair → open_gopro_ble) and the WiFi RC add-camera flow
+ * (handler_rc_add → gopro_wifi_rc_add_camera).  The state names map cleanly
+ * to both; the only transport-specific behavior is the cancel cleanup path
+ * (BLE: ble_gap_terminate; RC: remove the registered slot).
+ */
+typedef enum {
+    PAIR_TRANSPORT_BLE     = 0,   /* default — BLE add-camera flow */
+    PAIR_TRANSPORT_WIFI_RC = 1,   /* WiFi RC-emulation add-camera flow */
+} pair_attempt_transport_t;
+
+/* ---- Pair-attempt state machine (add-camera flow) ---- */
 typedef enum {
     PAIR_ATTEMPT_IDLE = 0,        /* No attempt has been started */
-    PAIR_ATTEMPT_CONNECTING,      /* BLE L2 connect in flight */
-    PAIR_ATTEMPT_BONDING,         /* L2 up, waiting for encrypted bond */
+    PAIR_ATTEMPT_CONNECTING,      /* BLE L2 connect in flight, or RC probes sent */
+    PAIR_ATTEMPT_BONDING,         /* BLE only: L2 up, waiting for encrypted bond */
     PAIR_ATTEMPT_PROVISIONING,    /* Slot registered, readiness sequence running */
     PAIR_ATTEMPT_SUCCESS,         /* Slot persisted; camera ready */
     PAIR_ATTEMPT_FAILED,          /* error_code + error_message valid */
