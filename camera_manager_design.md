@@ -517,32 +517,51 @@ typedef struct {
 
 ### 9.1 Pair-attempt state machine
 
-Single in-RAM state machine in `pair_attempt.c` tracks the user-initiated BLE add-camera flow and surfaces errors that prevent a camera from being remembered. Reconnects do not use this machine.
+Single in-RAM state machine in `pair_attempt.c` tracks the user-initiated add-camera flow (BLE *or* RC-emulation) and surfaces errors that prevent a camera from being remembered. Reconnects do not use this machine.
 
 ```c
 typedef enum {
+    PAIR_TRANSPORT_BLE     = 0,
+    PAIR_TRANSPORT_WIFI_RC = 1,
+} pair_attempt_transport_t;
+
+typedef enum {
     PAIR_ATTEMPT_IDLE,          /* No attempt has been started */
-    PAIR_ATTEMPT_CONNECTING,    /* BLE L2 connect in flight */
-    PAIR_ATTEMPT_BONDING,       /* L2 up, waiting for encrypted bond */
+    PAIR_ATTEMPT_CONNECTING,    /* BLE L2 connect in flight, or RC probes sent */
+    PAIR_ATTEMPT_BONDING,       /* BLE only: L2 up, waiting for encrypted bond */
     PAIR_ATTEMPT_PROVISIONING,  /* Slot registered, readiness sequence running */
     PAIR_ATTEMPT_SUCCESS,       /* Slot persisted; camera ready */
     PAIR_ATTEMPT_FAILED,        /* error_code + error_message valid */
 } pair_attempt_state_t;
 ```
 
-Error codes (`pair_attempt_error_t`): `NONE`, `SLOTS_FULL`, `BLE_CONNECT_FAILED`, `BOND_FAILED`, `HWINFO_TIMEOUT`, `MODEL_UNSUPPORTED`, `HANDSHAKE_TIMEOUT`, `DISCONNECTED`, `CANCELLED`, `INTERNAL`.
+`pair_attempt_begin(addr, addr_type, transport)` reserves the machine. The transport is recorded on `pair_attempt_info_t` and surfaced to the web UI via `/api/pair/status`. Both transports share `state`, error codes, sticky terminal states, the 20 s overall watchdog, and the `pair_attempt_advance` / `pair_attempt_fail` / `pair_attempt_set_model` API.
+
+Error codes (`pair_attempt_error_t`): `NONE`, `SLOTS_FULL`, `BLE_CONNECT_FAILED`, `BOND_FAILED`, `HWINFO_TIMEOUT`, `MODEL_UNSUPPORTED`, `HANDSHAKE_TIMEOUT`, `DISCONNECTED`, `CANCELLED`, `INTERNAL`. The BLE-specific codes never fire on the RC path; RC failures are `SLOTS_FULL` (no free slot at register time), `HANDSHAKE_TIMEOUT` (watchdog — no UDP response in 20 s), or `CANCELLED` (user/`/api/pair/cancel`).
 
 **Sticky terminal states:** SUCCESS and FAILED remain set until the next `pair_attempt_begin()` clears them. Avoids polling races where the UI could miss the result.
 
 **Forward-only transitions:** `pair_attempt_advance(state)` ignores any state at or behind the current state. `pair_attempt_fail(err, msg)` ignores calls when state is already terminal — the first specific cause wins (e.g. `HWINFO_TIMEOUT` raised before the inevitable `BLE_DISCONNECT` cleanup).
 
-**Wiring** (in `open_gopro_ble`):
+**Transport-aware cancel cleanup.** `pair_attempt_cancel()` always sets `FAILED + CANCELLED` (so racing `advance(SUCCESS)` becomes a no-op), then performs cleanup that depends on `info.transport`:
+
+- **`PAIR_TRANSPORT_BLE`:** call `ble_gap_conn_cancel()` then, if a `conn_handle` was recorded, `ble_gap_terminate()`. If a slot was registered during `PROVISIONING` and never reached `first_pair_complete`, remove it (mirrors the frozen-model cleanup path).
+- **`PAIR_TRANSPORT_WIFI_RC`:** look up the slot by MAC and remove it unconditionally. RC slots are committed (with `first_pair_complete = true`) at register time because there is no multi-step handshake to roll back to, so the BLE-style "remove only if PROVISIONING and not first_pair_complete" gate would never fire — without an unconditional removal, a never-responding device would leave a phantom camera in NVS.
+
+**Wiring (BLE — `open_gopro_ble`):**
 - `gopro_on_connected` → `advance(BONDING)` if addr matches the in-flight attempt.
 - `gopro_on_encrypted` → `advance(PROVISIONING)` after `register_new` succeeds; `fail(SLOTS_FULL)` if not.
 - `gopro_on_hw_info_ok` frozen-model branch → `fail(MODEL_UNSUPPORTED)` before terminating.
 - `on_readiness_timer` exhaustion → `fail(HWINFO_TIMEOUT)` before terminating.
 - `complete_connection_sequence` → `mark_first_pair_complete(slot)` then `advance(SUCCESS)`.
 - `gopro_on_disconnected` → `fail(DISCONNECTED)` if addr matches and state is non-terminal (no-op if a more specific cause is already set).
+
+**Wiring (RC — `gopro_wifi_rc`):**
+- `/api/rc/add` calls `pair_attempt_begin(mac, 0, PAIR_TRANSPORT_WIFI_RC)` *before* `gopro_wifi_rc_add_camera()`. Returns `409 Conflict` if a previous attempt is still in flight.
+- `gopro_wifi_rc_add_camera` registers the slot, primes keepalive + `st` + `cv`. If `register_new` fails, `fail(SLOTS_FULL)`.
+- `rc_handle_promote` (first UDP datagram from the camera) → `set_model(mapped)` if `cv` was parsed inline, then `advance(SUCCESS)` if addr matches the in-flight attempt.
+- `rc_handle_apply_cv` (cv response after promote) → `set_model(mapped) + advance(SUCCESS)` if addr matches. Both calls are no-ops once the state is terminal, so it's safe regardless of which command the work task processes first.
+- 20 s watchdog elapses with no SUCCESS → `pair_attempt_cancel` (RC branch removes the slot) → message overwritten to `HANDSHAKE_TIMEOUT`. UDP keepalive doesn't have a separate per-slot timeout — cv retries on every keepalive tick (3 s) until the watchdog fires or the camera responds.
 
 ### 9.2 BLE-disconnect status reset
 
@@ -1608,13 +1627,16 @@ handle_station_associated(mac)
 handle_promote(slot)
   -> ctx->wifi_ready = true
   -> camera_manager_on_camera_ready(slot)
+  -> active_pair = pair_attempt_addr_matches(ctx->mac)
   -> if !identify_attempted:
         if parsed_model_name is set (cv arrived first):
             identify_attempted = true
             apply (gopro_model_from_name + set_model + save_slot)
             /* name field intentionally left blank — see §17.2.5 */
+            if active_pair: pair_attempt_set_model(mapped)
         else:
             rc_send_cv(ip)     /* nudge — keepalive_tick will keep retrying */
+  -> if active_pair: pair_attempt_advance(SUCCESS)
   -> rc_send_datetime(slot)    /* gated on gopro_model_supports_http_datetime() */
 ```
 
@@ -1629,9 +1651,14 @@ handle_apply_cv(slot)
   -> camera_manager_save_slot(slot)
   /* slot's name field is intentionally left blank — see §17.2.5 */
   -> identify_attempted = true   /* keepalive_tick stops re-sending cv */
+  -> if pair_attempt_addr_matches(ctx->mac):
+        pair_attempt_set_model(mapped)
+        pair_attempt_advance(SUCCESS)   /* no-op if promote already advanced */
 ```
 
 If the camera never answers `cv` at all, the slot stays at `CAMERA_MODEL_GOPRO_HERO_LEGACY_RC` (the default seeded by `add_camera`). All UDP control still works in that state — only the resolved model enum and HTTP-datetime capability check are missing.
+
+**Pair-attempt success semantics.** For the web-UI Add flow, *any* UDP response from the camera proves it's a working RC GoPro, so the first promote = pair success. If `cv` is parsed first, the model is surfaced before SUCCESS. If `cv` arrives later (or never), the home-screen card picks up the upgraded model on its next refresh — by then the pair-progress modal is already closed. See §9.1 for the full state-machine wiring and the transport-aware cancel/timeout behaviour.
 
 #### 17.5.1 Status-poll bootstrap
 
@@ -1742,8 +1769,8 @@ void gopro_wifi_rc_sync_time_all(void);
 | File | Contents |
 |---|---|
 | `include/gopro_wifi_rc_spec.h` | Port numbers, `_GPHD_` payload string, opcode byte templates (`RC_PKT_ST`, `RC_PKT_SH_START`, `RC_PKT_SH_STOP`, `RC_PKT_CV`), `st`-response and `cv`-response field offsets, timing constants, HTTP path string (date/time only) |
-| `driver.c` | Init, vtable registration, work-queue dispatch (`CMD_PROMOTE`, `CMD_APPLY_CV`, `CMD_KEEPALIVE_TICK`, `CMD_WOL_RETRY`, `CMD_STATUS_POLL_ALL`, `CMD_SYNC_TIME_ALL`, station events), global status-poll timer; `gopro_wifi_rc_add_camera` primes the camera with keepalive + `st` + `cv` |
-| `connection.c` | Station lifecycle handlers; `rc_handle_promote` (cv-aware); `rc_handle_apply_cv`; `rc_handle_keepalive_tick` (which also re-sends `cv` until identify_attempted); `rc_handle_wol_retry`; per-slot timer arm/disarm |
+| `driver.c` | Init, vtable registration, work-queue dispatch (`CMD_PROMOTE`, `CMD_APPLY_CV`, `CMD_KEEPALIVE_TICK`, `CMD_WOL_RETRY`, `CMD_STATUS_POLL_ALL`, `CMD_SYNC_TIME_ALL`, station events), global status-poll timer; `gopro_wifi_rc_add_camera` primes the camera with keepalive + `st` + `cv` and calls `pair_attempt_fail(SLOTS_FULL, ...)` if no free slot is available for the in-flight Add attempt |
+| `connection.c` | Station lifecycle handlers; `rc_handle_promote` (cv-aware; calls `pair_attempt_advance(SUCCESS)` when the in-flight Add attempt's MAC matches); `rc_handle_apply_cv` (sets the resolved model on the pair_attempt info and advances to SUCCESS); `rc_handle_keepalive_tick` (which also re-sends `cv` until identify_attempted); `rc_handle_wol_retry`; per-slot timer arm/disarm |
 | `command.c` | Shutter task (UDP `SH`); `rc_send_datetime` (HTTP `setup/date_time`, gated on `gopro_model_supports_http_datetime`); `rc_http_get` retained as a minimal helper for date/time only |
 | `status.c` | Status-poll handler (sends UDP `st`); `rc_parse_st_response()` (binary b13/b14/b15); `rc_parse_cv_response()` (length-prefixed firmware + model name → ctx fields, posts CMD_APPLY_CV) |
 | `udp.c` | Single bound socket on 8383; `rc_send_keepalive`, `rc_send_st`, `rc_send_sh`, `rc_send_cv`, `rc_send_wol`; RX task with 0x5F / `st` / `SH` / `cv` dispatch |
@@ -1907,9 +1934,11 @@ All handlers follow the same structure: parse request -> call one component API 
 | `GET /api/cameras` | `open_gopro_ble_get_discovered()` |
 | `POST /api/scan` | `open_gopro_ble_start_discovery()` |
 | `POST /api/scan-cancel` | `open_gopro_ble_stop_discovery()` |
-| `POST /api/pair` | `open_gopro_ble_connect_by_addr()` |
+| `POST /api/pair` | `pair_attempt_begin(addr, addr_type, PAIR_TRANSPORT_BLE)` -> `open_gopro_ble_connect_by_addr()` |
+| `GET /api/pair/status` | `pair_attempt_get()` (shared by BLE and RC Add flows; response includes the `transport` field) |
+| `POST /api/pair/cancel` | `pair_attempt_cancel()` (transport-aware cleanup — see §9.1) |
 | `GET /api/rc/discovered` | `wifi_manager_get_connected_stations()` filtered by GoPro OUI allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c`) and `gopro_wifi_rc_is_managed_mac()` |
-| `POST /api/rc/add` | `gopro_wifi_rc_add_camera()` |
+| `POST /api/rc/add` | `pair_attempt_begin(addr, 0, PAIR_TRANSPORT_WIFI_RC)` -> `gopro_wifi_rc_add_camera()` |
 | `GET /api/settings/timezone` | `can_manager_get_tz_offset_hours()` |
 | `POST /api/settings/timezone` | `can_manager_set_tz_offset()` |
 | `POST /api/settings/datetime` | `can_manager_set_manual_utc_ms()` -> fires UTC-acquired path. Rejected with `ESP_ERR_INVALID_STATE` only after a live source has already won this session; an NVS-restored anchor at boot does not block manual entry. |

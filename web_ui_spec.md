@@ -480,14 +480,15 @@ Each unidentified device renders as a `.found-camera-row`:
 - Meta: `{addr} — {ip}` (or "IP pending" if no IP)
 - "Add" button (blue, `pair-this-btn`)
 
-**Add flow:**
+**Add flow** (mirrors the BLE pair flow — same `pair-overlay` modal and `/api/pair/status` polling):
 1. If IP missing: show "Cannot add — IP address not yet assigned. Wait a moment and click Refresh List." and abort
-2. `POST /api/rc/add` with `{ addr, ip }` — firmware defaults to `HERO4_BLACK`; no model picker in UI
-3. Show "Probing device {addr}… (up to 15 s)", disable UI
-4. After 15s: `GET /api/rc/discovered`
-   - If addr gone from list → "✅ Camera added — it will appear in the camera list shortly."
-   - If addr still in list → "⚠️ Could not identify {addr} as a GoPro camera."
-5. Re-enable button, refresh all lists
+2. Open the pair-progress modal (`openPairModal()`); this also closes the Manage Cameras modal so the home screen takes focus on success
+3. `POST /api/rc/add` with `{ addr, ip }` — firmware reserves the shared pair-attempt machine (`PAIR_TRANSPORT_WIFI_RC`) and primes the camera with keepalive + `st` + `cv`. `409 Conflict` means another pair attempt is in flight; the modal flips to the failure view immediately.
+4. `startPairStatusPoll()` — UI polls `GET /api/pair/status` every 1 s.
+   - State `connecting` → "Connecting to camera…" (default label)
+   - State `success` → "Success!", auto-dismiss after 2 s, then `refreshCameraStatus()` repaints the home-screen camera list. The cv-resolved model name surfaces on the home-screen card on its next refresh, even if cv arrived after the modal closed.
+   - State `failed` → mapped error label (e.g. `handshake_timeout` → "Camera setup timed out. Try again."); button changes to "OK".
+5. Cancel button → `POST /api/pair/cancel`. Server-side this removes the just-registered slot (RC slots are committed at register time; see §9.1 of `camera_manager_design.md`).
 
 ### 13.3 Section 3 — Paired Cameras
 
@@ -529,11 +530,12 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | POST | `/api/scan` | — | `{}` | Starts BLE scan |
 | POST | `/api/scan-cancel` | — | `{}` | Cancels BLE scan |
 | POST | `/api/pair` | `{ addr, addr_type }` | `{}` | Initiates BLE pairing. Returns `409 Conflict` if a previous pair attempt is still in flight (UI polls `/api/pair/status` until terminal). |
-| GET | `/api/pair/status` | — | `{ state, addr, addr_type, model, model_name, error_code, error_message }` | `state`: `"idle"\|"connecting"\|"bonding"\|"provisioning"\|"success"\|"failed"`. Sticky terminal state — `success` and `failed` persist until the next `POST /api/pair`. `error_code`: `"none"\|"slots_full"\|"ble_connect_failed"\|"bond_failed"\|"hwinfo_timeout"\|"model_unsupported"\|"handshake_timeout"\|"disconnected"\|"cancelled"\|"internal"`. |
+| POST | `/api/pair/cancel` | — | `{}` | Aborts the in-flight pair attempt (BLE *or* RC). For BLE, calls `ble_gap_conn_cancel` / `ble_gap_terminate`. For RC, removes the just-registered slot. Idempotent. |
+| GET | `/api/pair/status` | — | `{ state, transport, addr, addr_type, model, model_name, error_code, error_message }` | Shared by BLE and RC Add flows. `state`: `"idle"\|"connecting"\|"bonding"\|"provisioning"\|"success"\|"failed"` (RC never reports `bonding`/`provisioning` — it goes `connecting` → `success`). `transport`: `"ble"` or `"wifi_rc"`. Sticky terminal state — `success` and `failed` persist until the next `POST /api/pair` or `POST /api/rc/add`. `addr_type` is BLE-only (0 for RC). `error_code`: `"none"\|"slots_full"\|"ble_connect_failed"\|"bond_failed"\|"hwinfo_timeout"\|"model_unsupported"\|"handshake_timeout"\|"disconnected"\|"cancelled"\|"internal"`. |
 | POST | `/api/remove-camera` | `{ slot }` | `{}` | Removes paired camera (both types). `slot` is **1-based**. |
 | POST | `/api/shutter` | `{ on: bool }` or `{ slot, on: bool }` | `{ dispatched: int }` | Omit `slot` for all cameras. `slot` is **1-based**. |
 | GET | `/api/rc/discovered` | — | `[{ addr, ip }]` | Unprobed SoftAP stations whose MAC OUI is on the GoPro allow-list (`GOPRO_RC_OUIS[]` in `api_rc.c`). Non-GoPro stations are filtered out server-side. |
-| POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Starts async probe; firmware defaults to `HERO4_BLACK` |
+| POST | `/api/rc/add` | `{ addr, ip }` | `{}` | Reserves the shared pair-attempt machine (`PAIR_TRANSPORT_WIFI_RC`), then registers the slot and primes UDP keepalive + `st` + `cv`. UI polls `/api/pair/status` for `success` / `failed`. Returns `409 Conflict` if a pair attempt is already in flight. |
 | POST | `/api/reboot` | — | `{}` or no response | ESP32 may drop connection before responding |
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |
 | GET | `/api/settings/timezone` | — | `{ tz_offset_hours: int }` | |
@@ -562,7 +564,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 - **Model selection for RC-emulation cameras:** Firmware defaults to `HERO4_BLACK`; no model picker in the UI. ✅ Resolved (deferred).
 - **BLE-control cameras (Hero 9+):** Pairing alone is sufficient — there is no separate provisioning step. The post-readiness sequence (`GetHardwareInfo` → `SetCameraControlStatus(EXTERNAL)` → `SetDateTime` → status poll) runs automatically inside `open_gopro_ble`. ✅ Resolved.
 - **BLE status granularity:** Five states for BLE cameras (`disconnected` / `pairing` / `connecting` / `idle` / `recording`); three for WiFi (`disconnected` / `idle` / `recording`). The `pairing` vs `connecting` distinction is driven by the persisted `first_pair_complete` flag.
-- **Pair-attempt polling:** While the user is adding a new BLE camera, the UI polls `GET /api/pair/status` every ~1s until the state reaches `success` or `failed`. Errors are mapped to user-friendly messages by `PAIR_ERROR_LABEL` in `app.js`. The `model_unsupported` code surfaces frozen models (e.g. Hero 7) so the user gets a clear "this model is not supported" message instead of a silent disconnect.
+- **Pair-attempt polling:** Both the BLE Add flow and the WiFi RC Add flow drive the same `pair-overlay` modal and poll `GET /api/pair/status` every ~1 s until the state reaches `success` or `failed`. Errors are mapped to user-friendly messages by `PAIR_ERROR_LABEL` in `app.js`. The `model_unsupported` code surfaces frozen models (e.g. Hero 7) so the user gets a clear "this model is not supported" message instead of a silent disconnect. RC failures show as `handshake_timeout` (no UDP response in 20 s) or `slots_full`. The 15-second arbitrary refresh delay used in the pre-shared-modal RC flow is gone.
 - **Color palette:** V2 should use CSS custom properties (`:root { --blue: #2980b9; … }`) for maintainability.
 - **Settings → Device section:** May need additional entries (e.g. per-camera name edit) — TBD.
 - **Timezone half-hours:** Whole-hour offsets only. Not a V2 priority (e.g. UTC+5:30 would need `float` or half-hour `int`).
