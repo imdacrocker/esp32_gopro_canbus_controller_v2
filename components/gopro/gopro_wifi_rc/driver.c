@@ -316,6 +316,7 @@ bool gopro_wifi_rc_is_managed_mac(const uint8_t mac[6])
 
 void gopro_wifi_rc_sync_time_all(void)
 {
+    ESP_LOGI(TAG, "time sync (HTTP) requested for all WiFi RC slots");
     rc_work_cmd_t cmd = { .type = RC_CMD_SYNC_TIME_ALL };
     xQueueSend(s_work_queue, &cmd, 0);
 }

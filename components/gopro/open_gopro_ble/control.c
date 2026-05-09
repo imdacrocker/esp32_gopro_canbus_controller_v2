@@ -24,6 +24,8 @@ static const char *TAG = "gopro_ble/ctrl";
 void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
 {
     if (ctx->conn_handle == GOPRO_CONN_NONE || ctx->gatt.cmd_write == 0) {
+        ESP_LOGI(TAG, "slot %d: SetDateTime (BLE) skipped — not connected or no cmd_write",
+                 ctx->slot);
         return;
     }
 
@@ -32,13 +34,15 @@ void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
      * is "close" but not authoritative — we'd rather let the camera keep its
      * own clock than push a stale value. */
     if (!can_manager_utc_is_session_synced()) {
-        ESP_LOGD(TAG, "slot %d: SetDateTime deferred — UTC not session-synced",
+        ESP_LOGI(TAG, "slot %d: SetDateTime (BLE) deferred — UTC not session-synced",
                  ctx->slot);
         return;
     }
 
+    int8_t tz = can_manager_get_tz_offset();
     struct timeval tv;
     gettimeofday(&tv, NULL);
+    tv.tv_sec += (time_t)tz * 3600;
     struct tm t;
     gmtime_r(&tv.tv_sec, &t);
 
@@ -60,9 +64,9 @@ void gopro_control_set_datetime(gopro_ble_ctx_t *ctx)
         (uint8_t)(t.tm_sec),
     };
 
-    ESP_LOGI(TAG, "slot %d: SetDateTime %04d-%02d-%02d %02d:%02d:%02d UTC",
+    ESP_LOGI(TAG, "slot %d: SetDateTime (BLE) sending %04d-%02d-%02d %02d:%02d:%02d (tz=UTC%+d)",
              ctx->slot, year, t.tm_mon + 1, t.tm_mday,
-             t.tm_hour, t.tm_min, t.tm_sec);
+             t.tm_hour, t.tm_min, t.tm_sec, (int)tz);
 
     ble_core_gatt_write(ctx->conn_handle, ctx->gatt.cmd_write,
                         pkt, sizeof(pkt));

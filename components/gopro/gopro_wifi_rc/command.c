@@ -252,29 +252,37 @@ void rc_shutter_task(void *arg)
  * URL format follows the Lua-verified template: each of the six time fields
  * (year mod 100, month, day, hour, minute, second) is URL-encoded as %XX hex.
  *
- * TODO(§17.13): apply can_manager tz offset before encoding so the camera's
- * local-time fields are correct.  Currently sends UTC as-is.
+ * Local time is computed by shifting the UTC epoch by the user-set timezone
+ * offset (`can_manager_get_tz_offset()`, whole hours) before breaking it down
+ * with gmtime_r — same pattern as api_system.c's /api/utc handler.
  */
 void rc_send_datetime(int slot)
 {
     gopro_wifi_rc_ctx_t *ctx = &s_ctx[slot];
-    if (!ctx->last_ip) return;
-
-    camera_model_t model = camera_manager_get_model(slot);
-    if (!gopro_model_supports_http_datetime(model)) {
-        ESP_LOGD(TAG, "slot %d: datetime skipped — model has no HTTP datetime path",
+    if (!ctx->last_ip) {
+        ESP_LOGI(TAG, "slot %d: datetime (HTTP) skipped — no IP (not promoted)",
                  slot);
         return;
     }
 
-    if (!can_manager_utc_is_session_synced()) {
-        ESP_LOGD(TAG, "slot %d: skipping datetime — UTC not session-synced", slot);
+    camera_model_t model = camera_manager_get_model(slot);
+    if (!gopro_model_supports_http_datetime(model)) {
+        ESP_LOGI(TAG, "slot %d: datetime (HTTP) skipped — model %d has no HTTP datetime path",
+                 slot, (int)model);
         return;
     }
 
+    if (!can_manager_utc_is_session_synced()) {
+        ESP_LOGI(TAG, "slot %d: datetime (HTTP) skipped — UTC not session-synced",
+                 slot);
+        return;
+    }
+
+    int8_t tz = can_manager_get_tz_offset();
     time_t  t;
     struct tm now;
     time(&t);
+    t += (time_t)tz * 3600;
     gmtime_r(&t, &now);
 
     char path[80];
@@ -286,11 +294,15 @@ void rc_send_datetime(int slot)
              now.tm_min,
              now.tm_sec);
 
+    ESP_LOGI(TAG, "slot %d: datetime (HTTP) sending %04d-%02d-%02d %02d:%02d:%02d (tz=UTC%+d)",
+             slot, now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+             now.tm_hour, now.tm_min, now.tm_sec, (int)tz);
+
     int code = rc_http_get(ctx->last_ip, path, RC_HTTP_TIMEOUT_MS, NULL, 0);
     if (code == 200) {
-        ESP_LOGI(TAG, "slot %d: datetime set OK", slot);
+        ESP_LOGI(TAG, "slot %d: datetime (HTTP) set OK", slot);
     } else {
-        ESP_LOGD(TAG, "slot %d: datetime set → HTTP %d", slot, code);
+        ESP_LOGW(TAG, "slot %d: datetime (HTTP) set FAILED → HTTP %d", slot, code);
     }
 }
 
@@ -298,9 +310,19 @@ void rc_send_datetime(int slot)
 
 void rc_handle_sync_time_all(void)
 {
+    int considered = 0;
+    int skipped_not_ready = 0;
     for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
+        if (!gopro_model_uses_rc_emulation(camera_manager_get_model(i))) continue;
+        considered++;
         if (s_ctx[i].wifi_ready) {
             rc_send_datetime(i);
+        } else {
+            ESP_LOGI(TAG, "slot %d: datetime (HTTP) skipped — slot not wifi_ready",
+                     i);
+            skipped_not_ready++;
         }
     }
+    ESP_LOGI(TAG, "sync_time_all (HTTP): %d RC slot(s) considered, %d not ready",
+             considered, skipped_not_ready);
 }

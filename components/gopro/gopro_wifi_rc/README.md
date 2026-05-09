@@ -252,6 +252,5 @@ All three production tasks pinned to **core 0** to share the WiFi/lwIP stack wit
 |---|---|
 | `gopro_model.c` | `gopro_model_from_name()` lookup table is keyed off the model_name string in the `cv` response. Verified on real hardware: HERO4 Black, HERO4 Silver, HERO7 Black. HERO4 Session / HERO5 Black/Session / HERO6 Black / HERO 2018 are seeded from public docs but the actual reported strings haven't been observed yet. If the camera reports a different string, the lookup falls through to LEGACY_RC and the unexpected model_name is logged at INFO. |
 | `gopro_model_supports_http_datetime()` | Currently returns true only for HERO4_BLACK / HERO4_SILVER. Extend as Hero5+ STA-mode HTTP behaviour is verified. Hero7 confirmed silent on TCP port 80 in this mode (probed 2026-05); stays excluded. |
-| `command.c` `rc_send_datetime` | Currently sends UTC; needs `can_manager_get_tz_offset()` applied before hex-byte encoding so the camera's clock reflects local time. |
 | `command.c` `rc_send_datetime` | `CAMERA_MODEL_GOPRO_HERO_LEGACY_RC` and Hero7 have no working date/time path — the camera does not run an HTTP server on its STA interface in Smart-Remote mode. Documented limitation; UI may want to surface "camera clock not synced" to the user. |
 | Future opcodes | `YY` (clock/battery), `CM` (mode change), `PW` (power off) — documented in spec but not implemented. |

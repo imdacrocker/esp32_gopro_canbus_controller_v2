@@ -161,15 +161,23 @@ void open_gopro_ble_connect_by_addr(const ble_addr_t *addr)
 
 void open_gopro_ble_sync_time_all(void)
 {
-    ESP_LOGI(TAG,"time has been live synced, updating cameras");
+    ESP_LOGI(TAG, "time sync (BLE) requested for all connected slots");
+    int considered = 0;
+    int skipped_disconnected = 0;
     for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
         gopro_ble_ctx_t *ctx = &s_ctx[i];
+        if (!gopro_model_uses_ble_control(camera_manager_get_model(i))) continue;
+        considered++;
         if (ctx->conn_handle == GOPRO_CONN_NONE) {
+            ESP_LOGI(TAG, "slot %d: datetime (BLE) skipped — not connected", i);
+            skipped_disconnected++;
             continue;
         }
         gopro_control_set_datetime(ctx);
         ctx->datetime_pending_utc = false;
     }
+    ESP_LOGI(TAG, "sync_time_all (BLE): %d BLE slot(s) considered, %d disconnected",
+             considered, skipped_disconnected);
 }
 
 /* ---- camera_driver_t vtable --------------------------------------------- */
