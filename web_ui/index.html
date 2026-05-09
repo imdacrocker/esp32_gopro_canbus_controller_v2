@@ -21,34 +21,31 @@
 
 <!-- RaceCapture status -->
 <div class="section-card" id="rc-status-section">
-  <div class="section-title">RaceCapture Status</div>
-  <div id="rc-grid">
-    <div class="rc-cell">
-      <div class="rc-cell-label">Logging</div>
-      <div id="rc-logging-pill" class="rc-value rc-unknown">Unknown</div>
-    </div>
-    <div class="rc-cell">
-      <div class="rc-cell-label">RC Date / Time (Local)</div>
-      <div id="utc-display">
-        <div id="utc-date-line">No GPS</div>
-        <div id="utc-time-line"></div>
-      </div>
+  <div class="section-title">RaceCapture</div>
+  <div class="rc-cell">
+    <div id="rc-logging-pill" class="status-badge disconnected">
+      <span class="status-icon"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="5.2"/><line x1="3.5" y1="10.5" x2="10.5" y2="3.5"/></svg></span>
+      <span>Disconnected</span>
     </div>
   </div>
 </div>
 
-<!-- Auto-control -->
-<div class="section-card" id="auto-control-section">
-  <div id="auto-control-row">
-    <div class="ac-text">
-      <div class="ac-label">Automatic Control</div>
-      <div class="ac-sub">Turn this off for manual shutter control.  Cameras will start and stop recording automatically based on the RaceCapture logging status when on.</div>
-    </div>
-    <div class="toggle-wrap" id="toggle-wrap">
-      <div class="toggle-state" id="toggle-state">On</div>
-      <div class="toggle-track on" id="toggle-track">
-        <div class="toggle-thumb"></div>
+<!-- System time -->
+<div class="section-card" id="system-time-section">
+  <div class="section-title section-title-row">
+    <span>System Time (UTC -7)</span>
+    <button id="datetime-btn" class="section-title-btn" hidden>Sync</button>
+  </div>
+  <div class="rc-cell">
+    <div id="utc-display">
+      <div id="utc-text">
+        <div id="utc-date-line">No GPS</div>
+        <div id="utc-time-line"></div>
       </div>
+      <button id="time-info-btn" class="modal-info-btn" type="button" aria-label="More info" hidden>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+      </button>
+      <div class="modal-info-tooltip">System time was restored from memory but is stale and needs to be updated. Either wait for the RaceCapture to send UTC, or manually sync from this device.</div>
     </div>
   </div>
 </div>
@@ -56,9 +53,22 @@
 <!-- Status feedback -->
 <p id="status"></p>
 
-<!-- Camera status -->
+<!-- Cameras -->
 <div class="section-card" id="cam-status-section">
-  <div class="section-title">Camera Status</div>
+  <div class="section-title">Cameras</div>
+  <div id="auto-control-row">
+    <div class="ac-label">Automatic Control</div>
+    <div class="toggle-wrap" id="toggle-wrap">
+      <div class="toggle-track on" id="toggle-track">
+        <div class="toggle-thumb"></div>
+      </div>
+      <div class="toggle-state" id="toggle-state">On</div>
+    </div>
+    <button id="auto-control-info-btn" class="modal-info-btn" type="button" aria-label="More info">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+    </button>
+    <div class="modal-info-tooltip">Turn this off for manual shutter control. Cameras will start and stop recording automatically based on the RaceCapture logging status when on.</div>
+  </div>
   <div id="control-bar" style="display:none">
     <button id="btn-record-all">Record All</button>
     <button id="btn-stop-all">Stop All</button>
@@ -71,7 +81,7 @@
 
 <!-- Fixed bottom bar -->
 <div id="manage-bar">
-  <button id="manage-btn">+ Add / Manage Cameras</button>
+  <button id="manage-btn">Add / Manage Cameras</button>
 </div>
 
 <!-- Settings modal (top sheet) -->
@@ -87,13 +97,6 @@
     <div class="settings-row">
       <span class="settings-row-label">Time Zone</span>
       <select class="settings-select" id="tz-select"></select>
-    </div>
-
-    <div class="settings-row" id="datetime-row" style="display:none">
-      <span class="settings-row-label">Set Date &amp; Time</span>
-      <div id="datetime-action">
-        <button class="settings-action-btn" id="datetime-btn">Set from Device</button>
-      </div>
     </div>
 
     <button class="settings-reboot-btn" id="reboot-btn">Reboot</button>

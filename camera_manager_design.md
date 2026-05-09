@@ -1877,8 +1877,10 @@ The HTTP server checks `Accept-Encoding: gzip` in the request headers (sent by e
 Content-Encoding: gzip
 Content-Type: application/javascript   (or text/css)
 Content-Length: <compressed size>
-Cache-Control: max-age=3600
+Cache-Control: no-cache
 ```
+
+`Cache-Control: no-cache` is sent on every static-asset response (compressed and uncompressed). An earlier `max-age=3600` value caused browsers to keep cached old assets across LittleFS reflashes; `no-cache` forces revalidation on every page load so a freshly flashed web UI shows up without a manual hard-refresh.
 
 This also resolves the observed iOS loading issues. iOS Safari requires an accurate `Content-Length` header and handles chunked transfer encoding poorly from embedded HTTP servers. Serving a known-size pre-compressed file with explicit headers satisfies both requirements.
 
@@ -1921,7 +1923,7 @@ On `GET /` and `GET /index.html`: serve `/www/index.html` from LittleFS.
 
 On `GET /app.js` and `GET /style.css`: check `Accept-Encoding` header. If `gzip` is present, serve the `.gz` file with explicit `Content-Encoding: gzip` and `Content-Length`. This satisfies iOS Safari's requirement for accurate content length on compressed responses (see section 19.3).
 
-All asset responses include `Cache-Control: max-age=3600`.
+All asset responses include `Cache-Control: no-cache` (forces revalidation on every page load — see §19.3 for why this replaced the earlier `max-age=3600`).
 
 ### 20.4 API Handlers
 

@@ -242,25 +242,54 @@ document.getElementById('btn-stop-all').addEventListener('click', function () {
 
 /* ---- RC status + UTC + auto-control poll --------------------------------- */
 
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December'];
+
+const RC_LABEL = { logging: 'Logging', not_logging: 'Not Logging', unknown: 'Disconnected' };
+const RC_CAM_STATE = { logging: 'recording', not_logging: 'idle', unknown: 'disconnected' };
+
 function refreshTopSection() {
     apiFetch('GET', '/api/logging-state').then(d => {
-        const pill = document.getElementById('rc-logging-pill');
-        const cls  = 'rc-' + d.state.replace('_', '-');
-        const labels = { logging: 'Logging', not_logging: 'Not Logging', unknown: 'Unknown' };
-        pill.className = 'rc-value ' + cls;
-        pill.textContent = labels[d.state] || d.state;
+        const pill   = document.getElementById('rc-logging-pill');
+        const camSt  = RC_CAM_STATE[d.state] || 'disconnected';
+        const label  = RC_LABEL[d.state] || d.state;
+        pill.className = 'status-badge ' + camSt;
+        pill.innerHTML = (STATUS_ICON[camSt] || '') + `<span>${label}</span>`;
     }).catch(() => {});
 
     apiFetch('GET', '/api/utc').then(d => {
+        const display  = document.getElementById('utc-display');
         const dateLine = document.getElementById('utc-date-line');
         const timeLine = document.getElementById('utc-time-line');
-        if (!d.valid) {
-            dateLine.textContent = 'No GPS';
-            timeLine.textContent = '';
+        const syncBtn  = document.getElementById('datetime-btn');
+        const infoBtn  = document.getElementById('time-info-btn');
+        const tip      = display.querySelector('.modal-info-tooltip');
+        const unknown  = !d.valid;
+        const stale    = d.valid && !d.session_synced;
+        if (unknown) {
+            dateLine.textContent = '';
+            timeLine.textContent = '--:--:--';
+            display.classList.add('stale');
+            if (tip) tip.textContent = 'No time synced. Either wait for the RaceCapture to send UTC, or manually sync from this device.';
         } else {
             const dt = new Date(d.epoch_ms);
-            dateLine.textContent = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,'0')}-${String(dt.getUTCDate()).padStart(2,'0')}`;
-            timeLine.textContent = `${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}:${String(dt.getUTCSeconds()).padStart(2,'0')}`;
+            const h24 = dt.getUTCHours();
+            const ampm = h24 >= 12 ? 'PM' : 'AM';
+            const h12  = h24 % 12 || 12;
+            dateLine.textContent = `${MONTH_NAMES[dt.getUTCMonth()]} ${dt.getUTCDate()}, ${dt.getUTCFullYear()}`;
+            timeLine.textContent = `${String(h12).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}:${String(dt.getUTCSeconds()).padStart(2,'0')} ${ampm}`;
+            display.classList.toggle('stale', stale);
+            if (tip) tip.textContent = 'System time was restored from memory but is stale and needs to be updated. Either wait for the RaceCapture to send UTC, or manually sync from this device.';
+        }
+        // Hide both the SYNC and the info button on the same condition. The
+        // !dataset.busy gate keeps the buttons stable while a manual sync is
+        // animating its "Set ✓" confirmation.
+        const synced = !!d.session_synced;
+        const busy   = syncBtn && syncBtn.dataset.busy;
+        if (syncBtn && !busy) syncBtn.hidden = synced;
+        if (infoBtn && !busy) {
+            infoBtn.hidden = synced;
+            if (synced && tip) tip.classList.remove('show');
         }
     }).catch(() => {});
 
@@ -284,37 +313,41 @@ function openSettings() {
     apiFetch('GET', '/api/settings/timezone').then(d => {
         document.getElementById('tz-select').value = d.tz_offset_hours;
     }).catch(() => {});
-
-    // Show Set Date & Time row only when no live source has set time this
-    // session. d.valid alone is not sufficient — firmware persists UTC across
-    // reboots, so an NVS-restored boot value would otherwise hide the row
-    // even though the user might want to enter a fresh time.
-    apiFetch('GET', '/api/utc').then(d => {
-        document.getElementById('datetime-row').style.display = d.session_synced ? 'none' : 'flex';
-    }).catch(() => {});
 }
 
 function closeSettings() {
     settingsOverlay.classList.remove('open');
 }
 
-// Set Date & Time from browser — use event delegation so the button survives innerHTML replacement
-document.getElementById('settings-overlay').addEventListener('click', e => {
-    if (e.target.id !== 'datetime-btn') return;
-    const actionDiv = document.getElementById('datetime-action');
-    document.getElementById('datetime-btn').disabled = true;
+// Sync system time from browser
+document.getElementById('datetime-btn').addEventListener('click', () => {
+    const btn = document.getElementById('datetime-btn');
+    btn.dataset.busy = '1';
+    btn.disabled = true;
+    btn.textContent = '…';
     apiFetch('POST', '/api/settings/datetime', { epoch_ms: Date.now() })
         .then(() => {
-            actionDiv.innerHTML = '<span class="settings-inline-msg" style="color:var(--green)">Time set ✓</span>';
+            btn.textContent = 'Set ✓';
+            const display = document.getElementById('utc-display');
+            const infoBtn = document.getElementById('time-info-btn');
+            const tip     = display.querySelector('.modal-info-tooltip');
+            display.classList.remove('stale');
+            if (infoBtn) infoBtn.hidden = true;
+            if (tip) tip.classList.remove('show');
             setTimeout(() => {
-                actionDiv.innerHTML = '<button class="settings-action-btn" id="datetime-btn">Set from Device</button>';
-            }, 2000);
+                delete btn.dataset.busy;
+                btn.disabled = false;
+                btn.textContent = 'Sync';
+                btn.hidden = true;
+            }, 3000);
         })
         .catch(() => {
-            actionDiv.innerHTML = '<span class="settings-inline-msg" style="color:var(--red)">Failed — try again</span>';
+            btn.textContent = 'Failed';
             setTimeout(() => {
-                actionDiv.innerHTML = '<button class="settings-action-btn" id="datetime-btn">Set from Device</button>';
-            }, 2000);
+                delete btn.dataset.busy;
+                btn.disabled = false;
+                btn.textContent = 'Sync';
+            }, 3000);
         });
 });
 

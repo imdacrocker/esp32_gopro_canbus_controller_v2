@@ -29,6 +29,11 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* The HTML `hidden` attribute should win over explicit `display:` rules.
+ * Without this, e.g. `.modal-info-btn { display: flex }` keeps the button
+ * rendered even when JS sets `hidden = true`. */
+[hidden] { display: none !important; }
+
 html { font-size: 20px; }
 
 body {
@@ -38,6 +43,7 @@ body {
   max-width: 480px;
   margin: 0 auto;
   padding: 0 1em 5em;
+  touch-action: manipulation;
 }
 
 button {
@@ -117,6 +123,31 @@ button {
   padding: 8px 14px;
 }
 
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.section-title-btn {
+  font-family: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid var(--blue);
+  color: var(--blue);
+  cursor: pointer;
+}
+
+.section-title-btn:hover { background: #eaf4fb; }
+.section-title-btn:disabled { opacity: 0.6; cursor: default; }
+
 /* ---- RaceCapture status -------------------------------------------------- */
 
 #rc-grid {
@@ -141,22 +172,26 @@ button {
   margin-bottom: 4px;
 }
 
-.rc-value {
-  font-size: 1.05rem;
-  font-weight: 600;
+#system-time-section { overflow: visible; }
+
+#utc-display {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.rc-logging     { color: var(--green); }
-.rc-not-logging { color: var(--orange); }
-.rc-unknown     { color: var(--red); }
-
-#utc-date-line {
-  font-family: monospace;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--gray-text);
+#utc-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
+#utc-display .modal-info-btn {
+  margin-left: auto;
+}
+
+#utc-date-line,
 #utc-time-line {
   font-family: monospace;
   font-size: 0.88rem;
@@ -164,17 +199,21 @@ button {
   color: var(--gray-label);
 }
 
+#utc-display.stale #utc-date-line,
+#utc-display.stale #utc-time-line {
+  color: var(--orange);
+}
+
 /* ---- Auto-control -------------------------------------------------------- */
 
 #auto-control-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 14px;
-  gap: 12px;
+  padding: 12px 14px;
+  gap: 14px;
+  border-bottom: 1px solid var(--gray-border);
 }
-
-.ac-text { flex: 1; }
 
 .ac-label {
   font-size: 0.92rem;
@@ -182,19 +221,15 @@ button {
   color: var(--text-primary);
 }
 
-.ac-sub {
-  font-size: 0.72rem;
-  font-weight: 400;
-  color: var(--gray-text);
-  line-height: 1.4;
-  margin-top: 2px;
+#auto-control-row .modal-info-btn {
+  margin-left: auto;
 }
 
 .toggle-wrap {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   cursor: pointer;
   user-select: none;
   flex-shrink: 0;
@@ -240,7 +275,14 @@ button {
   min-height: 1.2em;
 }
 
+#status:empty {
+  margin: 0;
+  min-height: 0;
+}
+
 /* ---- Camera status section ----------------------------------------------- */
+
+#cam-status-section { overflow: visible; }
 
 #control-bar {
   display: grid;

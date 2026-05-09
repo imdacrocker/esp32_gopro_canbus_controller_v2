@@ -35,13 +35,21 @@ font-size (root): 20px   ← all rem values multiply from this
 
 The page is intentionally narrow/mobile-first. It is usable on a phone held in one hand at the side of a race car.
 
+### Global CSS resets
+
+Two non-default rules apply to every element on the page:
+
+- `*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }` — standard reset.
+- `[hidden] { display: none !important }` — forces the HTML `hidden` attribute to win over explicit `display:` rules. Required because some classes (`.modal-info-btn` for example) set `display: flex`, which would otherwise override the user-agent default `display: none` for `[hidden]` elements and silently break visibility toggles in JS.
+- `body { touch-action: manipulation }` — disables iOS double-tap-to-zoom (and equivalent gestures on Android) while preserving pinch-zoom for accessibility. No `user-scalable=no` in the viewport meta — that would block pinch-zoom too.
+
 ### Vertical stacking order (top to bottom, in DOM order)
 
 1. Sticky page header (gear icon)
-2. RaceCapture Status section
-3. Auto-Control section
-4. `<p id="status">` — transient feedback line
-5. Camera Status section (control bar + camera cards)
+2. RaceCapture section
+3. System Time section
+4. `<p id="status">` — transient feedback line (collapses to zero height when empty)
+5. Cameras section (Auto-Control row + control bar + camera cards)
 6. Fixed bottom bar ("Add / Manage Cameras" button)
 
 ---
@@ -106,13 +114,11 @@ All values used verbatim in the current CSS:
 | `cam-number` | `0.95rem` | 600 | |
 | `cam-display-name` | `0.7rem` | 700 | UPPERCASE, letter-spacing 0.06em, color `#999` |
 | `cam-model-name` | `0.72rem` | 400 | color `#999` |
-| Status badge | `0.88rem` | 600 | |
-| RC value | `1.05rem` | 600 | |
-| RC label | `0.68rem` | 400 | UPPERCASE, letter-spacing 0.08em, color `#999` |
-| UTC date line | `0.72rem` | 600 | monospace, color `#888` |
-| UTC time line | `0.88rem` | 600 | monospace, color `#555` |
+| Status badge | `0.88rem` | 600 | shared by the RC pill and camera cards |
+| UTC date line | `0.88rem` | 600 | monospace, color `--gray-label` (`#555`); orange when `#utc-display.stale` |
+| UTC time line | `0.88rem` | 600 | monospace, color `--gray-label` (`#555`); orange when `#utc-display.stale` |
+| Section title btn (Sync) | `0.7rem` | 700 | UPPERCASE, letter-spacing 0.1em, blue outlined |
 | Auto-control label | `0.92rem` | 600 | color `#222` |
-| Auto-control sub | `0.72rem` | 400 | color `#888`, line-height 1.4 |
 | Toggle state text | `0.78rem` | 600 | min-width 26px |
 | Buttons (primary) | `0.88rem` | 700 | |
 | Buttons (control bar) | `0.85rem` | 700 | |
@@ -169,7 +175,7 @@ padding: 16px 20px
 
 ---
 
-## 7. RaceCapture Status Section
+## 7. RaceCapture Section
 
 ```
 id: rc-status-section
@@ -177,57 +183,68 @@ border: 1px solid #ddd, border-radius: 10px, overflow: hidden
 margin: 0.4em 0 0.8em
 ```
 
-**Section title bar:** "RaceCapture Status", uppercase, `0.7rem`, weight 700, background `#f8f8f8`, border-bottom `#ddd`
+**Section title bar:** "RaceCapture", uppercase, `0.7rem`, weight 700, background `#f8f8f8`, border-bottom `#ddd`
 
-**Two-cell grid** (`display: grid; grid-template-columns: 1fr 1fr`):
+Single cell (`.rc-cell`, padding `12px 14px`) containing only the logging pill `#rc-logging-pill`. The card no longer includes the date/time — see §8.
 
-| Cell | Label | Value element | States |
-|---|---|---|---|
-| Left | "Logging" | `#rc-logging-pill` | See below |
-| Right | "RC Date/Time (Local)" | `#utc-display` | See below |
+**Logging pill** uses the same `.status-badge` system as the camera cards in the Cameras section (§10.2). The pill is rendered as an icon + label; `pill.className = 'status-badge ' + camState`, where the API state is mapped via `RC_CAM_STATE`:
 
-**Logging pill classes** (applied to `#rc-logging-pill`):
-```
-rc-value rc-logging      → color: #27ae60   text: "Logging"
-rc-value rc-not-logging  → color: #f39c12   text: "Not Logging"
-rc-value rc-unknown      → color: #e74c3c   text: "Unknown"
-```
-CSS rule: `el.className = 'rc-value rc-' + state.replace('_', '-')`
+| API `state` | UI label | `.status-badge` class | Icon | Text colour |
+|---|---|---|---|---|
+| `logging` | "Logging" | `recording` | filled red dot, `cam-pulse 1.2s` | `#c0271f` |
+| `not_logging` | "Not Logging" | `idle` | empty circle outline | `#248a3d` |
+| `unknown` | "Disconnected" | `disconnected` | circle with diagonal slash | `#9aa0a6` |
 
-**UTC / Local time display:**
-- Two `<div>` children inside `#utc-display` (font-family: monospace)
-- `#utc-date-line`: `YYYY-MM-DD`, `0.72rem`, color `#888`
-- `#utc-time-line`: `HH:MM:SS`, `0.88rem`, color `#555`
-- When GPS not yet valid: date line = "No GPS", time line = ""
-- Firmware returns epoch_ms with timezone offset already applied; JS reads getUTC* methods
+The label-mapping table is `RC_LABEL` in `app.js`; the colour/icon comes from the shared `.status-badge` rules in `style.css`. The legacy `.rc-value` / `.rc-logging` / `.rc-not-logging` / `.rc-unknown` rules are gone — only `.status-badge` styles apply now.
+
+Note that the firmware's `/api/logging-state` response still returns the literal `unknown`; only the rendered label changed to "Disconnected".
 
 ---
 
-## 8. Auto-Control Section
+## 8. System Time Section
 
 ```
-id: auto-control-section
-border: 1px solid #ddd, border-radius: 10px, overflow: hidden
+id: system-time-section
+border: 1px solid #ddd, border-radius: 10px, overflow: visible   ← visible so the info-button tooltip can extend below the card
 margin: 0 0 0.8em
 ```
 
-Single row (`#auto-control-row`, padding 14px, flex, space-between):
+**Section title bar:** flex row (`.section-title .section-title-row`) with the title on the left and a Sync button on the right.
+- Left: literal text `System Time (UTC -7)` (the offset is hard-coded in the markup for now).
+- Right: `<button id="datetime-btn" class="section-title-btn" hidden>Sync</button>` — small outlined blue button matching `--blue`. Hidden by default; revealed only when the system time still needs a manual sync (see "Sync gating" below).
 
-**Left side (text):**
-- Label: "Automatic Control", `0.92rem`, weight 600, color `#222`
-- Sub-label: "Cameras will start and stop recording automatically based on the RaceCapture logging status.", `0.72rem`, color `#888`
+**Body cell** (`.rc-cell`, padding `12px 14px`) contains `#utc-display` — a flex row laid out as:
 
-**Right side (toggle):**
-- State label: "On" (green `#27ae60`) / "Off" (gray `#999`), `0.78rem`, weight 600
-- Custom toggle: 56×32px track, 24px thumb
-  - Track ON: background `#27ae60`; OFF: background `#ccc`
-  - Thumb: always white, slides left→right (left: 4px → 28px)
-  - Transition: `background 0.2s`, `left 0.2s`
-- Clicking the entire `.toggle-wrap` calls `setAutoControl(!autoControlEnabled)`
+```
+#utc-display  (display:flex, align-items:center, gap:10px, position:relative)
+  #utc-text   (display:flex, flex-direction:column, gap:2px)
+    #utc-date-line   monospace 0.88rem weight 600 colour --gray-label
+    #utc-time-line   monospace 0.88rem weight 600 colour --gray-label
+  #time-info-btn     (.modal-info-btn, hidden by default; margin-left:auto)
+  .modal-info-tooltip
+```
 
-**Effect on Camera Status section:**
-- Auto ON → control bar (`#control-bar`) hidden; per-camera shutter buttons hidden
-- Auto OFF → control bar shown (2-col grid); per-camera shutter buttons shown on connected cameras
+Date and time render on **separate lines** with the same monospace styling. Date format is `Month D, YYYY` (e.g. `May 9, 2026`), built from a `MONTH_NAMES` array using `getUTCMonth() / getUTCDate() / getUTCFullYear()`. Time format is 12-hour with AM/PM (`hh:mm:ss AM/PM`, hours zero-padded), still using the UTC accessors. Firmware returns `epoch_ms` with the timezone offset already applied — JS uses the `getUTC*` methods so it does not re-apply the local timezone.
+
+**Display states** (driven by `/api/utc` flags `valid` and `session_synced`):
+
+| Condition | Date line | Time line | `#utc-display` class | Tooltip text |
+|---|---|---|---|---|
+| `!valid` (unknown) | empty | `--:--:--` | `.stale` (orange) | "No time synced. Either wait for the RaceCapture to send UTC, or manually sync from this device." |
+| `valid && !session_synced` (NVS-restored / stale) | formatted date | formatted time | `.stale` (orange) | "System time was restored from memory but is stale and needs to be updated. Either wait for the RaceCapture to send UTC, or manually sync from this device." |
+| `valid && session_synced` (live source won this boot) | formatted date | formatted time | (no `.stale`; default colour `--gray-label`) | (info button hidden, tooltip not shown) |
+
+The `.stale` class colours both `#utc-date-line` and `#utc-time-line` with `var(--orange)` (`#f39c12`). There is no `(STALE)` suffix any more — colour is the only stale indicator.
+
+**Sync gating:** the Sync button (`#datetime-btn`) and the info button (`#time-info-btn`) share the same visibility rule — both are hidden when `session_synced == true` and shown when `session_synced == false`. The `!syncBtn.dataset.busy` guard keeps the buttons stable while a manual sync is animating its "Set ✓" confirmation.
+
+**Manual sync flow** (clicking `#datetime-btn`):
+1. `dataset.busy = '1'`, button disabled, label `…`.
+2. `POST /api/settings/datetime { epoch_ms: Date.now() }`.
+3. On success: label flips to `Set ✓`, the `.stale` class is removed immediately, the info button is hidden, and after **3 seconds** the button hides itself and the busy flag clears.
+4. On error: label flips to `Failed` for 3 seconds, then resets to `Sync` (still visible).
+
+**Info button** (`#time-info-btn`) uses the same default `.modal-info-btn` styling as the buttons in the Add/Manage Cameras modal — 44×44 px circular with a 28×28 px "i in a circle" SVG. Its tooltip is the absolutely-positioned `.modal-info-tooltip` immediately following it inside `#utc-display`. The tooltip text is rewritten on each `/api/utc` poll to match the current state (see table above).
 
 ---
 
@@ -237,22 +254,49 @@ Single row (`#auto-control-row`, padding 14px, flex, space-between):
 <p id="status"></p>
 ```
 - Color `#555`, `0.5em 0 1em` margin, min-height `1.2em`
+- Collapses to zero height (`#status:empty { margin: 0; min-height: 0 }`) when no message is set, so it does not introduce a phantom gap between the System Time and Cameras cards
 - Transient text set by `setStatus(msg)` after shutter commands
 - Cleared automatically only by subsequent commands (not on a timer)
 
 ---
 
-## 10. Camera Status Section
+## 10. Cameras Section
 
 ```
 id: cam-status-section
-border: 1px solid #ddd, border-radius: 10px, overflow: hidden
+border: 1px solid #ddd, border-radius: 10px, overflow: visible   ← visible so the auto-control info-button tooltip can extend below the card
 margin: 0 0 0.8em
 ```
 
-**Section title bar:** "Camera Status", same style as RaceCapture title bar
+**Section title bar:** "Cameras", same style as the RaceCapture title bar.
 
-**Control bar** (`#control-bar`):
+### 10.0 Auto-Control row (first row inside the card)
+
+The Auto-Control no longer has its own card — it lives as the first row inside the Cameras section, above the control bar.
+
+```
+#auto-control-row  (position:relative, display:flex, align-items:center,
+                    padding:12px 14px, gap:14px, border-bottom:1px solid #ddd)
+```
+
+Row contents, left-to-right:
+- `.ac-label` "Automatic Control" (`0.92rem`, weight 600, colour `--text-primary`).
+- `.toggle-wrap` (`#toggle-wrap`) — the custom toggle, with the on/off state label rendered to the **right** of the toggle (not above it).
+  - `.toggle-track` (56×32 px, border-radius 16, background `--gray-toggle-off`; `.on` swaps to `--green`).
+  - `.toggle-thumb` (24×24 white, slides `left: 4px → 28px`).
+  - `.toggle-state` (`#toggle-state`) text: "On" (colour `--green`) / "Off" (colour `--gray-light`), `0.78rem` weight 600.
+  - Clicking anywhere in the wrap calls `setAutoControl(!autoControlEnabled)`.
+- `#auto-control-info-btn` (`.modal-info-btn`, `margin-left:auto` so it right-justifies). Tapping toggles its sibling `.modal-info-tooltip`, which contains: "Turn this off for manual shutter control. Cameras will start and stop recording automatically based on the RaceCapture logging status when on."
+
+The previous standalone descriptive paragraph (`.ac-sub`) is gone — that text now lives entirely inside the info-button tooltip.
+
+**Effect on the rest of the section:**
+- Auto ON → control bar (`#control-bar`) hidden; per-camera shutter buttons hidden.
+- Auto OFF → control bar shown (2-col grid); per-camera shutter buttons shown on connected cameras.
+
+### 10.1 Control bar
+
+`#control-bar`:
 - Shown only when Auto-Control is OFF
 - 2-column grid, gap 10px, padding 14px, border-bottom `#ddd`
 - "Record All" button: green `#27ae60`, calls `sendShutter(true)`
@@ -277,7 +321,7 @@ Card internal layout:
 .cam-meta  (flex, align-items: baseline, gap: 8px, margin-bottom: 4px)
   .cam-number       "Cam {index}"    0.95rem, weight 600, #222
   .cam-display-name  {cam.name}       0.7rem,  weight 700, UPPERCASE, #999
-  .cam-type-badge   "WiFi RC"        (RC-emulation cameras only — see §10.2)
+  .cam-type-badge   "WiFi RC"        (RC-emulation cameras only — see §10.3)
 
 .cam-model-name  {cam.model_name}  0.72rem, #999, margin-bottom 12px
   (omitted when model_name is absent or equals cam.name)
@@ -286,7 +330,7 @@ Card internal layout:
   .status-badge  + optional shutter button
 ```
 
-### 10.1 Status Badge
+### 10.2 Status Badge
 
 ```
 .status-badge  display: inline-flex, align-items: center, gap: 8px
@@ -307,7 +351,7 @@ Card internal layout:
 - `connecting` applies to both transports. For BLE: any non-READY state once `first_pair_complete` is set. For RC: the slot is associated to the SoftAP but `wifi_status != WIFI_CAM_READY` — either still waiting on the first UDP response after a fresh associate, or demoted from READY by the keepalive silence watchdog (WoL retry loop active). The slot returns to `idle`/`recording` on the next received UDP datagram, or to `disconnected` if the camera disassociates from the AP.
 - `idle` and `recording` are gated on `wifi_status == WIFI_CAM_READY` (which BLE drivers also flip at the end of their readiness sequence — the field is overloaded as the universal "fully ready" signal).
 
-### 10.2 Type Badge (RC-emulation cameras)
+### 10.3 Type Badge (RC-emulation cameras)
 
 ```
 .cam-type-badge
@@ -317,7 +361,7 @@ Card internal layout:
 ```
 Shown on camera cards and paired rows when `cam.type === 'rc_emulation'`. Badge text: "WiFi RC".
 
-### 10.3 Per-Camera Shutter Buttons
+### 10.4 Per-Camera Shutter Buttons
 
 Rendered only when **Auto-Control is OFF** and camera is `idle` or `recording`:
 
@@ -384,14 +428,8 @@ Clicking the overlay backdrop (not the modal card) also closes the modal.
   - Labels: "UTC-12" … "UTC" … "UTC+14"
   - On change: `POST /api/settings/timezone` with `{ tz_offset_hours: int }`
   - On open: `GET /api/settings/timezone` → sets selected value
-- **Set Date & Time row** — only rendered when `session_synced == false` (checked at modal open via `GET /api/utc`):
-  - Label "Set Date & Time" left, `<button>` "Set from Device" right
-  - Button style: blue outline, `0.85rem`, `min-height: 36px`, `border-radius: 6px`
-  - On tap: reads `Date.now()` from the browser, `POST /api/settings/datetime` with `{ epoch_ms: number }`
-  - On success: brief inline confirmation "Time set ✓" replaces button for 2 s, then restores
-  - On error: inline "Failed — try again" in red for 2 s
-  - Row is hidden (not just disabled) once a live source has set time this session, so it does not clutter the UI during normal race operation
-  - Note: the firmware persists UTC across reboots, so `valid` may be `true` (NVS-restored) while `session_synced` is still `false`. The row must gate on `session_synced` — gating on `valid` would hide the row even when the only available time is a stale boot-time restore
+
+The Settings modal no longer contains a "Set Date & Time" row — the manual sync button moved to the System Time section header on the home screen (see §8). `openSettings()` no longer fetches `/api/utc`. The modal now contains only the Time Zone select, the Reboot button, and the Factory Reset button.
 
 **Reboot button:**
 ```
@@ -537,7 +575,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 
 | Method | Path | Request body | Response body | Notes |
 |---|---|---|---|---|
-| GET | `/api/logging-state` | — | `{ state: "logging"\|"not_logging"\|"unknown" }` | |
+| GET | `/api/logging-state` | — | `{ state: "logging"\|"not_logging"\|"unknown" }` | UI renders `unknown` as the label "Disconnected" (see §7). |
 | GET | `/api/utc` | — | `{ valid: bool, session_synced: bool, epoch_ms: int }` | epoch_ms has tz offset applied. `valid` is true whenever any anchor is available (incl. NVS-restored at boot). `session_synced` is true only after a live source — GPS frame or manual web set — won this boot session. |
 | GET | `/api/auto-control` | — | `{ enabled: bool }` | |
 | POST | `/api/auto-control` | `{ enabled: bool }` | `{ enabled: bool }` | |
@@ -556,7 +594,7 @@ All polls fire independently via `setInterval`; no coordination or debouncing be
 | POST | `/api/factory-reset` | — | `{}` or no response | Same as above |
 | GET | `/api/settings/timezone` | — | `{ tz_offset_hours: int }` | |
 | POST | `/api/settings/timezone` | `{ tz_offset_hours: int }` | `{}` | |
-| POST | `/api/settings/datetime` | `{ epoch_ms: number }` | `{}` | Only accepted when `session_synced == false` (no live source has won yet — NVS-restored boot value does not block manual entry). Sets system time from browser clock; triggers `open_gopro_ble_sync_time_all()` and `gopro_wifi_rc_sync_time_all()`. |
+| POST | `/api/settings/datetime` | `{ epoch_ms: number }` | `{}` | Only accepted when `session_synced == false` (no live source has won yet — NVS-restored boot value does not block manual entry). Sets system time from browser clock; triggers `open_gopro_ble_sync_time_all()` and `gopro_wifi_rc_sync_time_all()`. The UI calls this from the Sync button in the System Time section header (see §8); it is no longer reachable from the Settings modal. |
 
 ---
 

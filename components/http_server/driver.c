@@ -97,7 +97,7 @@ static bool client_accepts_gzip(httpd_req_t *req)
 static esp_err_t handler_index(httpd_req_t *req)
 {
     return serve_file(req, "/www/index.html", "text/html", NULL,
-                      "max-age=3600");
+                      "no-cache");
 }
 
 /* GET /app.js — serve gzipped if client supports it */
@@ -105,10 +105,10 @@ static esp_err_t handler_app_js(httpd_req_t *req)
 {
     if (client_accepts_gzip(req)) {
         return serve_file(req, "/www/app.js.gz",
-                          "application/javascript", "gzip", "max-age=3600");
+                          "application/javascript", "gzip", "no-cache");
     }
     return serve_file(req, "/www/app.js",
-                      "application/javascript", NULL, "max-age=3600");
+                      "application/javascript", NULL, "no-cache");
 }
 
 /* GET /style.css — serve gzipped if client supports it */
@@ -116,10 +116,10 @@ static esp_err_t handler_style_css(httpd_req_t *req)
 {
     if (client_accepts_gzip(req)) {
         return serve_file(req, "/www/style.css.gz",
-                          "text/css", "gzip", "max-age=3600");
+                          "text/css", "gzip", "no-cache");
     }
     return serve_file(req, "/www/style.css",
-                      "text/css", NULL, "max-age=3600");
+                      "text/css", NULL, "no-cache");
 }
 
 /* ---- Component init ------------------------------------------------------ */
