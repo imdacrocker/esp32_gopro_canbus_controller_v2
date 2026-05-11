@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GoPro Controller — Recovery</title>
+<style>
+ :root { color-scheme: light dark; --b: #555; --bg: #fafafa; --fg: #111; --acc: #06c; --warn: #c40; --ok: #060; }
+ @media (prefers-color-scheme: dark) { :root { --bg: #181818; --fg: #eee; --acc: #6cf; --warn: #fc6; --ok: #6f6; --b: #888; } }
+ body { font: 15px/1.4 system-ui, sans-serif; max-width: 38rem; margin: 1rem auto; padding: 0 1rem; background: var(--bg); color: var(--fg); }
+ h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+ h2 { font-size: 1rem; margin: 1.2rem 0 .4rem; border-bottom: 1px solid var(--b); padding-bottom: .15rem; }
+ .ver { color: var(--b); font-size: .9rem; margin-bottom: 1rem; }
+ fieldset { border: 1px solid var(--b); border-radius: 4px; margin: 0 0 .8rem; padding: .5rem .8rem; }
+ legend { padding: 0 .3rem; font-weight: 600; }
+ label { display: block; font-size: .85rem; margin-top: .4rem; color: var(--b); }
+ input[type=file], input[type=text] { width: 100%; box-sizing: border-box; padding: .25rem; font: inherit; background: transparent; color: var(--fg); border: 1px solid var(--b); border-radius: 3px; }
+ input[type=text] { font-family: ui-monospace, monospace; font-size: .8rem; }
+ button { padding: .4rem .8rem; font: inherit; border: 1px solid var(--b); border-radius: 3px; background: var(--bg); color: var(--fg); cursor: pointer; margin-top: .5rem; }
+ button:hover:not(:disabled) { border-color: var(--acc); }
+ button:disabled { opacity: .5; cursor: not-allowed; }
+ .primary { background: var(--acc); color: white; border-color: var(--acc); }
+ .danger  { color: var(--warn); }
+ progress { width: 100%; height: 14px; margin-top: .4rem; }
+ .log { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre-wrap; padding: .5rem; background: rgba(128,128,128,.08); border-radius: 3px; margin-top: .5rem; min-height: 1.4em; }
+ .log.err { color: var(--warn); }
+ .log.ok  { color: var(--ok); }
+ .meta { font-size: .8rem; color: var(--b); }
+</style>
+</head>
+<body>
+<h1>GoPro Controller — Recovery</h1>
+<div class="ver" id="ver">Loading version…</div>
+
+<fieldset>
+ <legend>1. Main app image</legend>
+ <label>app.bin</label>
+ <input type="file" id="appFile" accept=".bin">
+ <label>SHA-256 (auto-computed if browser supports crypto.subtle, else paste from <code>Get-FileHash app.bin</code>)</label>
+ <input type="text" id="appSha" placeholder="64 hex chars">
+ <div class="meta" id="appMeta"></div>
+ <progress id="appProg" value="0" max="100" hidden></progress>
+ <div class="log" id="appLog"></div>
+ <button id="appUp">Upload app</button>
+</fieldset>
+
+<fieldset>
+ <legend>2. Storage / web UI image (optional)</legend>
+ <label>storage.bin</label>
+ <input type="file" id="uiFile" accept=".bin">
+ <label>SHA-256</label>
+ <input type="text" id="uiSha" placeholder="64 hex chars">
+ <div class="meta" id="uiMeta"></div>
+ <progress id="uiProg" value="0" max="100" hidden></progress>
+ <div class="log" id="uiLog"></div>
+ <button id="uiUp">Upload storage</button>
+</fieldset>
+
+<fieldset>
+ <legend>3. Commit &amp; reboot</legend>
+ <p class="meta">Activates whatever was just uploaded and reboots into the main app.</p>
+ <div class="log" id="commitLog"></div>
+ <button id="commit" class="primary">Commit &amp; reboot</button>
+</fieldset>
+
+<fieldset>
+ <legend>Boot main app without uploading</legend>
+ <p class="meta">Use this if you ended up here by accident and ota_0 already has a working app.</p>
+ <div class="log" id="bootLog"></div>
+ <button id="bootMain">Boot main app</button>
+</fieldset>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+const log = (id, msg, cls) => { const el = $(id); el.textContent = msg; el.className = 'log' + (cls ? ' ' + cls : ''); };
+
+async function loadVersion() {
+  try {
+    const r = await fetch('/api/version');
+    const j = await r.json();
+    $('ver').textContent = `Recovery v${j.app}  •  mode: ${j.mode}  •  running from: ${j.running_partition}`;
+  } catch (e) { $('ver').textContent = 'Could not read /api/version'; }
+}
+
+async function sha256Hex(buf) {
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return null; // caller should keep the manual field
+}
+
+function bindFile(fileId, shaId, metaId) {
+  $(fileId).addEventListener('change', async () => {
+    const f = $(fileId).files[0];
+    if (!f) { $(metaId).textContent = ''; return; }
+    $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes — computing SHA…`;
+    const buf = await f.arrayBuffer();
+    const hex = await sha256Hex(buf);
+    if (hex) { $(shaId).value = hex; $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes`; }
+    else      { $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes — paste SHA-256 manually`; }
+  });
+}
+
+bindFile('appFile', 'appSha', 'appMeta');
+bindFile('uiFile',  'uiSha',  'uiMeta');
+
+function upload(endpoint, file, sha, progId, logId) {
+  return new Promise((resolve, reject) => {
+    if (!file) return reject(new Error('pick a file first'));
+    if (!/^[0-9a-f]{64}$/.test(sha)) return reject(new Error('SHA-256 must be 64 lowercase hex chars'));
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', endpoint);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-Sha256', sha);
+    xhr.setRequestHeader('X-Size',   String(file.size));
+
+    $(progId).hidden = false;
+    xhr.upload.onprogress = e => { if (e.lengthComputable) $(progId).value = (e.loaded / e.total) * 100; };
+    xhr.onload = () => {
+      $(progId).hidden = true;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch { resolve({}); }
+      } else reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || xhr.statusText}`));
+    };
+    xhr.onerror = () => { $(progId).hidden = true; reject(new Error('network error')); };
+    xhr.send(file);
+  });
+}
+
+$('appUp').addEventListener('click', async () => {
+  $('appUp').disabled = true; log('appLog', 'uploading…');
+  try {
+    const r = await upload('/api/ota/upload-app', $('appFile').files[0], $('appSha').value.trim().toLowerCase(), 'appProg', 'appLog');
+    log('appLog', r.skipped ? `skipped (existing SHA matched)` : `wrote ${r.written?.toLocaleString() ?? '?'} bytes`, 'ok');
+  } catch (e) { log('appLog', e.message, 'err'); }
+  finally     { $('appUp').disabled = false; }
+});
+
+$('uiUp').addEventListener('click', async () => {
+  $('uiUp').disabled = true; log('uiLog', 'uploading…');
+  try {
+    const r = await upload('/api/ota/upload-ui', $('uiFile').files[0], $('uiSha').value.trim().toLowerCase(), 'uiProg', 'uiLog');
+    log('uiLog', r.skipped ? `skipped (existing SHA matched)` : `wrote ${r.written?.toLocaleString() ?? '?'} bytes`, 'ok');
+  } catch (e) { log('uiLog', e.message, 'err'); }
+  finally     { $('uiUp').disabled = false; }
+});
+
+$('commit').addEventListener('click', async () => {
+  $('commit').disabled = true; log('commitLog', 'committing…');
+  try {
+    const r = await fetch('/api/ota/commit', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    log('commitLog', 'committed — device rebooting. Reload in ~5 s.', 'ok');
+  } catch (e) { log('commitLog', e.message, 'err'); $('commit').disabled = false; }
+});
+
+$('bootMain').addEventListener('click', async () => {
+  $('bootMain').disabled = true; log('bootLog', 'requesting boot…');
+  try {
+    const r = await fetch('/api/ota/boot-main', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    log('bootLog', 'rebooting into main app. Reload in ~5 s.', 'ok');
+  } catch (e) { log('bootLog', e.message, 'err'); $('bootMain').disabled = false; }
+});
+
+loadVersion();
+</script>
+</body>
+</html>

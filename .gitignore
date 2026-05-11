@@ -53,9 +53,13 @@ dkms.conf
 
 # debug information files
 *.dwo
-/sdkconfig
-/managed_components
-/build
+# ESP-IDF build artifacts — match in any app dir under apps/*
+sdkconfig
+sdkconfig.old
+managed_components/
+build/
+
 /.vscode
 /.claude
-/sdkconfig.old
+/apps/recovery/.vscode
+/apps/main/.vscode

@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "recovery_http.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_http_server
+        esp_app_format
+        ota_io
+)

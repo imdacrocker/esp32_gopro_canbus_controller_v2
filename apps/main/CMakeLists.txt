@@ -4,6 +4,10 @@ cmake_minimum_required(VERSION 3.22)
 
 set(IDF_TARGET "esp32s3")
 
+# Pick up shared components from the monorepo's top-level components/ dir
+# (currently just `ota_io`, shared with the recovery app).
+list(APPEND EXTRA_COMPONENT_DIRS "../../components")
+
 # Tell ESP-IDF to also scan components/gopro/ for sub-components
 # (open_gopro_ble, open_gopro_http, gopro_wifi_rc live there).
 list(APPEND EXTRA_COMPONENT_DIRS "components/gopro")

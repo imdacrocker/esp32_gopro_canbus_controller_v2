@@ -1,33 +1,41 @@
-# dev.ps1 - daily dev wrapper for the main app.
+# dev.ps1 - daily dev wrapper for the monorepo.
 #
 # Usage:
-#   .\dev.ps1                      # build + OTA-flash + monitor (default)
-#   .\dev.ps1 build                # build only
-#   .\dev.ps1 flash                # build + OTA-flash (no monitor)
-#   .\dev.ps1 flash-usb            # build + USB-flash main app only (ota_0)
-#   .\dev.ps1 monitor              # idf.py monitor
-#   .\dev.ps1 -ip 10.71.79.1 ...   # override target IP (default = SoftAP IP)
-#   .\dev.ps1 -port COM7 ...       # override serial port
+#   .\dev.ps1                                # build + OTA-flash + monitor (main app, default)
+#   .\dev.ps1 build                          # build only
+#   .\dev.ps1 flash                          # build + OTA-flash (no monitor)
+#   .\dev.ps1 flash-usb                      # build + USB-flash to running slot
+#   .\dev.ps1 monitor                        # idf.py monitor
+#   .\dev.ps1 -App recovery build            # build the recovery app
+#   .\dev.ps1 -App recovery flash-usb        # build + USB-flash recovery to factory slot
+#   .\dev.ps1 -ip 10.71.79.1 ...             # override target IP (default = SoftAP IP)
+#   .\dev.ps1 -port COM7 ...                 # override serial port
 #
-# The OTA-flash path POSTs app.bin (and storage.bin if it exists) to the
-# device's /api/ota/upload-* endpoints, then /api/ota/commit. Upload is a
-# no-op on the device side when the SHA matches NVS (SHA-skip, ota_design.md
-# section 6) - useful when only one of the two binaries actually changed.
+# OTA flow (`flash`, `all`) is main-app only — recovery has no storage.bin and is
+# only reflashed over USB. See tools\flash_factory.ps1 for full board provisioning.
 #
 # Requires the IDF environment to be sourced first:
 #   & 'C:\esp\v6.0.1\esp-idf\export.ps1'
 
 param(
     [Parameter(Position=0)] [string]$cmd = "all",
+    [ValidateSet("main","recovery")] [string]$App = "main",
     [string]$ip   = "10.71.79.1",
     [string]$port = "COM3"
 )
 
 $ErrorActionPreference = "Stop"
 
-$proj = $PSScriptRoot
-$bin  = Join-Path $proj "build\esp32_gopro_canbus_controller_v2.bin"
-$ui   = Join-Path $proj "build\storage.bin"
+$repo = $PSScriptRoot
+$proj = Join-Path $repo "apps\$App"
+
+# Build artifact names come from the project() call in each app's CMakeLists.
+$binName = if ($App -eq "main") { "esp32_gopro_canbus_controller_v2.bin" } else { "esp32_gopro_canbus_recovery.bin" }
+$bin     = Join-Path $proj "build\$binName"
+$ui      = Join-Path $proj "build\storage.bin"   # main-only
+
+# USB-flash offset: main goes to ota_0, recovery to factory.
+$usbOffset = if ($App -eq "main") { "0xE0000" } else { "0x20000" }
 
 function Build   { idf.py -C $proj build }
 function Monitor { idf.py -C $proj -p $port monitor }
@@ -48,6 +56,7 @@ function Curl-Post($url, $headers, $bodyPath) {
 }
 
 function FlashOta {
+    if ($App -ne "main") { throw "OTA flow is main-app only. Use -App main or flash-usb." }
     if (-not (Test-Path $bin)) { throw "$bin missing - run build first" }
 
     $appSha  = Sha256OfFile $bin
@@ -72,12 +81,9 @@ function FlashOta {
 }
 
 function FlashUsb {
-    # Main app only - for when OTA can't reach the device. Recovery and
-    # storage are NOT touched. Use tools\flash_factory.ps1 for a full
-    # provisioning of a fresh board (bootloader + recovery + main + storage).
     Build
-    Write-Host "USB-flashing main app to ota_0 (0xE0000) on $port ..."
-    python -m esptool --chip esp32s3 -p $port -b 921600 write_flash 0xE0000 $bin
+    Write-Host "USB-flashing $App app to $usbOffset on $port ..."
+    python -m esptool --chip esp32s3 -p $port -b 921600 write_flash $usbOffset $bin
 }
 
 switch ($cmd) {
@@ -86,5 +92,5 @@ switch ($cmd) {
     "flash-usb" { FlashUsb }
     "monitor"   { Monitor }
     "all"       { Build; FlashOta; Monitor }
-    default     { Write-Host "usage: .\dev.ps1 [build|flash|flash-usb|monitor|all] [-ip IP] [-port COMn]" }
+    default     { Write-Host "usage: .\dev.ps1 [build|flash|flash-usb|monitor|all] [-App main|recovery] [-ip IP] [-port COMn]" }
 }

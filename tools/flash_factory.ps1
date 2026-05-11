@@ -4,9 +4,9 @@
 # device, after a `--erase-flash`, or when OTA has gotten the device into a
 # state recovery can't recover from. For daily dev use .\dev.ps1 instead.
 #
-# Sibling project layout assumed:
-#   <parent>\esp32_gopro_canbus_controller_v2\   (this script lives in tools\)
-#   <parent>\esp32_gopro_canbus_recovery\
+# Monorepo layout (this script lives in tools\ at the repo root):
+#   <repo>\apps\main\
+#   <repo>\apps\recovery\
 #
 # Requires the IDF environment to be sourced first:
 #   & 'C:\esp\v6.0.1\esp-idf\export.ps1'
@@ -17,8 +17,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$mainProj = Resolve-Path (Join-Path $PSScriptRoot "..")
-$recProj  = Resolve-Path (Join-Path $PSScriptRoot "..\..\esp32_gopro_canbus_recovery")
+$mainProj = Resolve-Path (Join-Path $PSScriptRoot "..\apps\main")
+$recProj  = Resolve-Path (Join-Path $PSScriptRoot "..\apps\recovery")
 $mainBld  = Join-Path $mainProj "build"
 $recBld   = Join-Path $recProj  "build"
 
@@ -27,7 +27,7 @@ idf.py -C $mainProj build
 Write-Host "Building recovery:  $recProj"
 idf.py -C $recProj  build
 
-# Partition layout (see esp32_gopro_canbus_controller_v2\partitions.csv):
+# Partition layout (see partitions.csv at repo root):
 #   0x000000  bootloader.bin
 #   0x008000  partition-table.bin
 #   0x00F000  ota_data_initial.bin   — points the bootloader at ota_0

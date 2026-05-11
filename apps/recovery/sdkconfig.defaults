@@ -1,0 +1,68 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Share the partition table with the main app (lives at the monorepo root).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../partitions.csv"
+
+# Recovery image lands in the `factory` slot — bootloader rollback semantics
+# only matter for the OTA slots, but we keep this enabled so the recovery's
+# bootloader (if ever the one running) behaves identically to main's.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Reported via /api/version. Bump in lockstep with breaking upload-protocol
+# changes (manifest's `min_recovery_version`, see ota_design.md §5).
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="0.1.0"
+
+# DHCP server for SoftAP clients
+CONFIG_LWIP_DHCPS=y
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8
+
+# Socket budget: httpd (8) + httpd internal (3) + headroom = 12
+CONFIG_LWIP_MAX_SOCKETS=12
+
+# tcpip_thread stack — match the main project so httpd behavior is identical
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=5120
+
+# Required for X-Sha256 + X-Size custom headers on upload requests
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# Pin esp_timer to core 0 alongside WiFi for parity with main
+CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0=y
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+
+# ---- Size budget: recovery image must fit in the 512 KB factory partition ----
+#
+# Optimize for size, not debug ergonomics.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Smaller printf (drops floating-point + %a + some width handling); saves ~50 KB
+# on libesp_stdio. Recovery only logs simple integers / strings.
+CONFIG_NEWLIB_NANO_FORMAT=y
+
+# WiFi runs in OPEN auth mode (see wifi_manager.c). No WPA/WPA2/Enterprise.
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_WPS_SOFTAP_REGISTRAR=n
+CONFIG_ESP_WIFI_ENABLE_WAPI_PSK=n
+CONFIG_ESP_WIFI_MBEDTLS_TLS_CLIENT=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_ESP_WIFI_SUITE_B_192=n
+
+# mbedtls: drop deprecated/legacy crypto modules. Keep TLS/X509 enabled
+# because tcp_transport/esp-tls compile against them even though recovery
+# doesn't use TLS — it's cheaper to ship those than to surgically exclude them.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+CONFIG_MBEDTLS_PEM_PARSE_C=n
+CONFIG_MBEDTLS_PEM_WRITE_C=n
+CONFIG_MBEDTLS_RIPEMD160_C=n
+CONFIG_MBEDTLS_HAVE_TIME=n
+CONFIG_MBEDTLS_HAVE_TIME_DATE=n
+
+# httpd: drop WebSocket support and oversized defaults.
+CONFIG_HTTPD_WS_SUPPORT=n
