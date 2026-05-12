@@ -5,6 +5,8 @@
  *   GET  /api/settings/timezone
  *   POST /api/settings/timezone
  *   POST /api/settings/datetime
+ *   GET  /api/settings/can-bitrate
+ *   POST /api/settings/can-bitrate
  */
 
 #include <stdio.h>
@@ -102,14 +104,66 @@ static esp_err_t handler_post_datetime(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---- GET /api/settings/can-bitrate --------------------------------------- */
+
+static esp_err_t handler_get_can_bitrate(httpd_req_t *req)
+{
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"bitrate_bps\":%u}",
+             (unsigned)can_manager_get_bitrate());
+    send_json(req, buf);
+    return ESP_OK;
+}
+
+/* ---- POST /api/settings/can-bitrate -------------------------------------- */
+/*
+ * Body: {"bitrate_bps": <50000|100000|125000|250000|500000|1000000>}.
+ * Persists to NVS; takes effect on next reboot.
+ */
+static esp_err_t handler_post_can_bitrate(httpd_req_t *req)
+{
+    char body[64];
+    if (read_body(req, body, sizeof(body)) < 0) return ESP_FAIL;
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_FAIL;
+    }
+    cJSON *item = cJSON_GetObjectItem(root, "bitrate_bps");
+    if (!cJSON_IsNumber(item)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing bitrate_bps");
+        return ESP_FAIL;
+    }
+    uint32_t bps = (uint32_t)cJSON_GetNumberValue(item);
+    cJSON_Delete(root);
+
+    esp_err_t err = can_manager_set_bitrate(bps);
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid bitrate_bps");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "set failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "CAN bitrate set to %u bps", (unsigned)bps);
+    send_json(req, "{}");
+    return ESP_OK;
+}
+
 /* ---- Registration -------------------------------------------------------- */
 
 void api_settings_register(httpd_handle_t server)
 {
     static const httpd_uri_t uris[] = {
-        { .uri = "/api/settings/timezone", .method = HTTP_GET,  .handler = handler_get_timezone  },
-        { .uri = "/api/settings/timezone", .method = HTTP_POST, .handler = handler_post_timezone },
-        { .uri = "/api/settings/datetime", .method = HTTP_POST, .handler = handler_post_datetime },
+        { .uri = "/api/settings/timezone",    .method = HTTP_GET,  .handler = handler_get_timezone    },
+        { .uri = "/api/settings/timezone",    .method = HTTP_POST, .handler = handler_post_timezone   },
+        { .uri = "/api/settings/datetime",    .method = HTTP_POST, .handler = handler_post_datetime   },
+        { .uri = "/api/settings/can-bitrate", .method = HTTP_GET,  .handler = handler_get_can_bitrate  },
+        { .uri = "/api/settings/can-bitrate", .method = HTTP_POST, .handler = handler_post_can_bitrate },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(server, &uris[i]);

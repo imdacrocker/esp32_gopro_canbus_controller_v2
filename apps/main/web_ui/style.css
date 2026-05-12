@@ -656,6 +656,13 @@ button {
   align-items: center;
 }
 
+.settings-hint {
+  font-size: 0.78rem;
+  color: var(--orange-dark);
+  padding: 6px 16px 10px;
+  border-bottom: 1px solid var(--gray-border-light);
+}
+
 .settings-reboot-btn {
   display: block;
   width: calc(100% - 32px);

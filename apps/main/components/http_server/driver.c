@@ -156,7 +156,7 @@ void http_server_init(void)
     httpd_config_t config    = HTTPD_DEFAULT_CONFIG();
     config.stack_size        = 12288;
     config.max_open_sockets  = 8;
-    config.max_uri_handlers  = 35;   /* 5 assets + 7 system + 10 cameras + 2 rc + 3 settings + 6 ota = 33, +2 margin */
+    config.max_uri_handlers  = 37;   /* 5 assets + 7 system + 10 cameras + 2 rc + 5 settings + 6 ota = 35, +2 margin */
     config.uri_match_fn      = httpd_uri_match_wildcard;
 
     httpd_handle_t server = NULL;

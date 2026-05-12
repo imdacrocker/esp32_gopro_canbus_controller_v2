@@ -81,6 +81,18 @@ bool can_manager_get_utc_ms(uint64_t *out_ms);
 bool can_manager_utc_is_session_synced(void);
 
 /*
+ * CAN bitrate configuration.
+ *
+ * Allowed values (bps): 50000, 100000, 125000, 250000, 500000, 1000000.
+ * Default: 1000000 (1 Mbps).  Persisted in NVS; takes effect on next boot.
+ *
+ * can_manager_set_bitrate() validates the input against the allowed list and
+ * returns ESP_ERR_INVALID_ARG otherwise.
+ */
+uint32_t  can_manager_get_bitrate(void);
+esp_err_t can_manager_set_bitrate(uint32_t bitrate_bps);
+
+/*
  * Persist a UTC-to-local offset in NVS (§14.3).
  * Clamped to IANA valid range [−12, +14].
  */

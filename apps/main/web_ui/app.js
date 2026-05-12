@@ -59,6 +59,21 @@ function buildTimezoneDropdown() {
     });
 }
 
+/* ---- CAN bitrate dropdown ------------------------------------------------ */
+
+let canBitrateInitial = null;
+
+document.getElementById('can-bitrate-select').addEventListener('change', () => {
+    const sel = document.getElementById('can-bitrate-select');
+    const hint = document.getElementById('can-bitrate-hint');
+    const bps = parseInt(sel.value, 10);
+    apiFetch('POST', '/api/settings/can-bitrate', { bitrate_bps: bps })
+        .then(() => {
+            if (hint) hint.hidden = (bps === canBitrateInitial);
+        })
+        .catch(() => {});
+});
+
 /* ---- Auto-control toggle ------------------------------------------------- */
 
 function applyAutoControl(enabled) {
@@ -325,6 +340,14 @@ function openSettings() {
     apiFetch('GET', '/api/settings/timezone').then(d => {
         document.getElementById('tz-select').value = d.tz_offset_hours;
         updateSystemTimeLabel(d.tz_offset_hours);
+    }).catch(() => {});
+
+    // Load current CAN bitrate
+    apiFetch('GET', '/api/settings/can-bitrate').then(d => {
+        canBitrateInitial = d.bitrate_bps;
+        document.getElementById('can-bitrate-select').value = String(d.bitrate_bps);
+        const hint = document.getElementById('can-bitrate-hint');
+        if (hint) hint.hidden = true;
     }).catch(() => {});
 }
 

@@ -49,6 +49,23 @@ static const char *TAG = "can_manager";
 #define NVS_NAMESPACE        "can_mgr"
 #define NVS_KEY_TZ_OFFSET    "tz_off"
 #define NVS_KEY_LAST_UTC_MS  "last_utc"
+#define NVS_KEY_BITRATE      "bitrate"
+
+/* ---- Bitrate -------------------------------------------------------------- */
+
+#define CAN_BITRATE_DEFAULT  1000000u
+
+static const uint32_t CAN_BITRATES_ALLOWED[] = {
+    50000u, 100000u, 125000u, 250000u, 500000u, 1000000u,
+};
+
+static bool bitrate_is_allowed(uint32_t bps)
+{
+    for (size_t i = 0; i < sizeof(CAN_BITRATES_ALLOWED) / sizeof(CAN_BITRATES_ALLOWED[0]); i++) {
+        if (CAN_BITRATES_ALLOWED[i] == bps) return true;
+    }
+    return false;
+}
 
 /* Periodic UTC-to-NVS save once UTC is valid.  Coarse interval keeps flash
  * wear reasonable: at 5 min we never lose more than ~5 minutes of clock
@@ -92,6 +109,8 @@ static struct {
 } s_utc;
 
 static int8_t s_tz_offset = 0; /* UTC by default; user-configurable via /api/settings/timezone, persisted in NVS. */
+
+static uint32_t s_bitrate_bps = CAN_BITRATE_DEFAULT; /* loaded from NVS at init; applies on next boot. */
 
 static esp_timer_handle_t s_tx_timer;
 static esp_timer_handle_t s_watchdog_timer;
@@ -346,6 +365,19 @@ static void load_tz_offset(void)
     nvs_close(h);
 }
 
+static void load_bitrate(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    uint32_t val;
+    if (nvs_get_u32(h, NVS_KEY_BITRATE, &val) == ESP_OK && bitrate_is_allowed(val)) {
+        s_bitrate_bps = val;
+    }
+    nvs_close(h);
+}
+
 static void save_tz_offset(void)
 {
     nvs_handle_t h;
@@ -368,6 +400,7 @@ void can_manager_register_callbacks(const can_manager_callbacks_t *cbs)
 void can_manager_init(void)
 {
     load_tz_offset();
+    load_bitrate();
 
     s_utc_mutex = xSemaphoreCreateMutex();
     configASSERT(s_utc_mutex);
@@ -389,7 +422,7 @@ void can_manager_init(void)
             .bus_off_indicator = -1,
         },
         .bit_timing = {
-            .bitrate = 1000000,   /* 1 Mbps */
+            .bitrate = s_bitrate_bps,
         },
         .tx_queue_depth = CAN_TX_QUEUE_DEPTH,
         .fail_retry_cnt = 0,      /* single attempt — drop on ACK error (no receiver connected) */
@@ -402,7 +435,8 @@ void can_manager_init(void)
     ESP_ERROR_CHECK(twai_node_register_event_callbacks(s_node, &twai_cbs, NULL));
 
     ESP_ERROR_CHECK(twai_node_enable(s_node));
-    ESP_LOGI(TAG, "TWAI started at 1 Mbps (TX=%d RX=%d)", CAN_TX_GPIO, CAN_RX_GPIO);
+    ESP_LOGI(TAG, "TWAI started at %u bps (TX=%d RX=%d)",
+             (unsigned)s_bitrate_bps, CAN_TX_GPIO, CAN_RX_GPIO);
 
     /* 5 s watchdog — fires if no 0x600 frame arrives. */
     esp_timer_create_args_t wd_args = {
@@ -512,4 +546,30 @@ bool can_manager_utc_is_session_synced(void)
     bool synced = s_utc.session_synced;
     xSemaphoreGive(s_utc_mutex);
     return synced;
+}
+
+uint32_t can_manager_get_bitrate(void)
+{
+    return s_bitrate_bps;
+}
+
+esp_err_t can_manager_set_bitrate(uint32_t bitrate_bps)
+{
+    if (!bitrate_is_allowed(bitrate_bps)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_bitrate_bps = bitrate_bps;
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open failed");
+        return ESP_FAIL;
+    }
+    nvs_set_u32(h, NVS_KEY_BITRATE, bitrate_bps);
+    nvs_commit(h);
+    nvs_close(h);
+
+    ESP_LOGI(TAG, "CAN bitrate set to %u bps (applies on reboot)",
+             (unsigned)bitrate_bps);
+    return ESP_OK;
 }
