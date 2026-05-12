@@ -6,5 +6,6 @@ idf_component_register(
     REQUIRES
         esp_http_server
         esp_app_format
+        nvs_flash
         ota_io
 )

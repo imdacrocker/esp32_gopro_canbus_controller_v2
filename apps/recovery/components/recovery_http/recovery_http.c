@@ -8,6 +8,7 @@
  *   POST /api/ota/upload-ui       — stream new storage image
  *   POST /api/ota/commit          — set boot partition + reboot
  *   POST /api/ota/boot-main       — boot ota_0 without uploading anything
+ *   POST /api/factory-reset       — erase NVS and reboot
  */
 
 #include <stdio.h>
@@ -21,6 +22,7 @@
 #include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 #include "sdkconfig.h"
 #include "recovery_http.h"
@@ -362,7 +364,9 @@ static esp_err_t handler_upload_app(httpd_req_t *req)
     snprintf(body, sizeof(body),
              "{\"written\":%u,\"sha256\":\"%s\",\"skipped\":false}",
              (unsigned)expected_size, actual_sha);
-    return send_json(req, body);
+    esp_err_t send_err = send_json(req, body);
+    ESP_LOGI(TAG, "upload-app response: %s", esp_err_to_name(send_err));
+    return send_err;
 }
 
 /* ---- POST /api/ota/upload-ui -------------------------------------------- */
@@ -436,7 +440,9 @@ static esp_err_t handler_upload_ui(httpd_req_t *req)
     snprintf(body, sizeof(body),
              "{\"written\":%u,\"sha256\":\"%s\",\"skipped\":false}",
              (unsigned)expected_size, actual_sha);
-    return send_json(req, body);
+    esp_err_t send_err = send_json(req, body);
+    ESP_LOGI(TAG, "upload-ui response: %s", esp_err_to_name(send_err));
+    return send_err;
 }
 
 /* ---- POST /api/ota/commit ----------------------------------------------- */
@@ -490,6 +496,17 @@ static esp_err_t handler_boot_main(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---- POST /api/factory-reset -------------------------------------------- */
+
+static esp_err_t handler_factory_reset(httpd_req_t *req)
+{
+    ESP_LOGW(TAG, "factory reset — erasing NVS");
+    send_json(req, "{}");
+    nvs_flash_erase();
+    schedule_reboot();
+    return ESP_OK;
+}
+
 /* ---- registration -------------------------------------------------------- */
 
 esp_err_t recovery_http_init(const char *html, size_t html_len)
@@ -502,9 +519,11 @@ esp_err_t recovery_http_init(const char *html, size_t html_len)
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 12;
-    /* Uploads can be slow; keep recv timeout generous. */
-    cfg.recv_wait_timeout = 30;
-    cfg.send_wait_timeout = 30;
+    /* Storage erase + write of a 3 MB image takes ~85 s, during which the
+     * client is just waiting for our response. Generous timeouts so the
+     * idle wait doesn't trip httpd's per-call recv/send guards. */
+    cfg.recv_wait_timeout = 120;
+    cfg.send_wait_timeout = 120;
 
     esp_err_t err = httpd_start(&server, &cfg);
     if (err != ESP_OK) {
@@ -521,6 +540,7 @@ esp_err_t recovery_http_init(const char *html, size_t html_len)
         { .uri = "/api/ota/boot-main",    .method = HTTP_POST, .handler = handler_boot_main    },
         { .uri = "/api/ota/channel",      .method = HTTP_GET,  .handler = handler_get_channel  },
         { .uri = "/api/ota/channel",      .method = HTTP_POST, .handler = handler_post_channel },
+        { .uri = "/api/factory-reset",    .method = HTTP_POST, .handler = handler_factory_reset},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         err = httpd_register_uri_handler(server, &routes[i]);

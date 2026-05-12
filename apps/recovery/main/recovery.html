@@ -5,8 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GoPro Controller — Recovery</title>
 <style>
- :root { color-scheme: light dark; --b: #555; --bg: #fafafa; --fg: #111; --acc: #06c; --warn: #c40; --ok: #060; }
- @media (prefers-color-scheme: dark) { :root { --bg: #181818; --fg: #eee; --acc: #6cf; --warn: #fc6; --ok: #6f6; --b: #888; } }
+ :root { color-scheme: light; --b: #555; --bg: #fafafa; --fg: #111; --acc: #06c; --warn: #c40; --ok: #060; }
  body { font: 15px/1.4 system-ui, sans-serif; max-width: 38rem; margin: 1rem auto; padding: 0 1rem; background: var(--bg); color: var(--fg); }
  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
  h2 { font-size: 1rem; margin: 1.2rem 0 .4rem; border-bottom: 1px solid var(--b); padding-bottom: .15rem; }
@@ -16,11 +15,13 @@
  label { display: block; font-size: .85rem; margin-top: .4rem; color: var(--b); }
  input[type=file], input[type=text] { width: 100%; box-sizing: border-box; padding: .25rem; font: inherit; background: transparent; color: var(--fg); border: 1px solid var(--b); border-radius: 3px; }
  input[type=text] { font-family: ui-monospace, monospace; font-size: .8rem; }
- button { padding: .4rem .8rem; font: inherit; border: 1px solid var(--b); border-radius: 3px; background: var(--bg); color: var(--fg); cursor: pointer; margin-top: .5rem; }
+ button { width: 100%; box-sizing: border-box; padding: .4rem .8rem; font: inherit; border: 1px solid var(--b); border-radius: 3px; background: var(--bg); color: var(--fg); cursor: pointer; margin-top: .5rem; }
  button:hover:not(:disabled) { border-color: var(--acc); }
  button:disabled { opacity: .5; cursor: not-allowed; }
  .primary { background: var(--acc); color: white; border-color: var(--acc); }
  .danger  { color: var(--warn); }
+ button.danger { background: #e74c3c; color: white; border-color: #e74c3c; }
+ button.danger:hover:not(:disabled) { background: #c0392b; border-color: #c0392b; }
  progress { width: 100%; height: 14px; margin-top: .4rem; }
  .log { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre-wrap; padding: .5rem; background: rgba(128,128,128,.08); border-radius: 3px; margin-top: .5rem; min-height: 1.4em; }
  .log.err { color: var(--warn); }
@@ -53,44 +54,35 @@
 </fieldset>
 
 <h2>Manual upload</h2>
-<p class="meta">Use this if the cloud is unreachable or you want a specific version. Fields stay independent of the cloud flow above.</p>
+<p class="meta">Use this if the cloud is unreachable or you want a specific version. Select both files; the device will upload, commit, and reboot automatically.</p>
 
 <fieldset>
- <legend>1. Main app image</legend>
+ <legend>Manual upload</legend>
  <label>app.bin</label>
  <input type="file" id="appFile" accept=".bin">
- <label>SHA-256 (auto-computed if browser supports crypto.subtle, else paste from <code>Get-FileHash app.bin</code>)</label>
- <input type="text" id="appSha" placeholder="64 hex chars">
  <div class="meta" id="appMeta"></div>
- <progress id="appProg" value="0" max="100" hidden></progress>
- <div class="log" id="appLog"></div>
- <button id="appUp">Upload app</button>
-</fieldset>
 
-<fieldset>
- <legend>2. Storage / web UI image (optional)</legend>
  <label>storage.bin</label>
  <input type="file" id="uiFile" accept=".bin">
- <label>SHA-256</label>
- <input type="text" id="uiSha" placeholder="64 hex chars">
  <div class="meta" id="uiMeta"></div>
- <progress id="uiProg" value="0" max="100" hidden></progress>
- <div class="log" id="uiLog"></div>
- <button id="uiUp">Upload storage</button>
-</fieldset>
 
-<fieldset>
- <legend>3. Commit &amp; reboot</legend>
- <p class="meta">Activates whatever was just uploaded and reboots into the main app.</p>
- <div class="log" id="commitLog"></div>
- <button id="commit" class="primary">Commit &amp; reboot</button>
+ <button id="uploadAll" class="primary" disabled>Upload Files</button>
+ <progress id="uploadProg" value="0" max="100" hidden></progress>
+ <div class="log" id="uploadLog"></div>
 </fieldset>
 
 <fieldset>
  <legend>Boot main app without uploading</legend>
  <p class="meta">Use this if you ended up here by accident and ota_0 already has a working app.</p>
+ <button id="bootMain" class="primary">Boot main app</button>
  <div class="log" id="bootLog"></div>
- <button id="bootMain">Boot main app</button>
+</fieldset>
+
+<fieldset>
+ <legend>Factory Reset</legend>
+ <p class="meta">Erases all paired cameras, saved settings, and the OTA channel selection, then reboots. The installed app and storage images are <strong>not</strong> touched.</p>
+ <button id="resetBtn" class="danger">Factory Reset</button>
+ <div class="log" id="resetLog"></div>
 </fieldset>
 
 <script>
@@ -132,6 +124,13 @@ async function loadChannel() {
   } catch (e) { log('upLog', "Couldn't load channel.", 'err'); }
 }
 
+function resetCheckButton() {
+  const btn = $('upCheck');
+  btn.textContent = 'Check for updates';
+  btn.onclick = doCheck;
+  btn.disabled = !(otaBaseUrl && otaRepoPath);
+}
+
 $('upChannel').addEventListener('change', async () => {
   const sel = $('upChannel');
   const next = sel.value;
@@ -146,6 +145,7 @@ $('upChannel').addEventListener('change', async () => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     sel.dataset.last = next;
     log('upLog', '');  // clear any prior result
+    resetCheckButton();
   } catch (e) {
     sel.value = sel.dataset.last;
     log('upLog', `Couldn't change channel: ${e.message}`, 'err');
@@ -211,7 +211,7 @@ function uploadBlob(path, bytes, sha, onPct) {
   });
 }
 
-$('upCheck').addEventListener('click', async () => {
+async function doCheck() {
   if (!otaBaseUrl || !otaRepoPath) return;
   $('upCheck').disabled = true;
   log('upLog', 'Checking…');
@@ -230,7 +230,9 @@ $('upCheck').addEventListener('click', async () => {
     log('upLog', e.message, 'err');
     $('upCheck').disabled = false;
   }
-});
+}
+
+$('upCheck').onclick = doCheck;
 
 async function doInstall(m) {
   const btn = $('upCheck');
@@ -255,7 +257,8 @@ async function doInstall(m) {
     log('upLog', 'Committing…');
     const r = await fetch('/api/ota/commit', { method: 'POST' });
     if (!r.ok) throw new Error(`commit failed: HTTP ${r.status}`);
-    log('upLog', `Installed v${m.app.version}. Device is rebooting into the main app — reload in ~10s.`, 'ok');
+    log('upLog', `Installed v${m.app.version}. Device is rebooting into the main app…`, 'ok');
+    setTimeout(() => location.reload(), 3000);
   } catch (e) {
     log('upLog', e.message, 'err');
     btn.disabled = false;
@@ -264,78 +267,196 @@ async function doInstall(m) {
   }
 }
 
-async function sha256Hex(buf) {
-  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
-    const h = await crypto.subtle.digest('SHA-256', buf);
-    return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('');
+/* Pure-JS SHA-256. Used because crypto.subtle.digest isn't available in
+ * non-secure contexts (plain HTTP on private IPs) — which is exactly how
+ * the recovery page is served. Yields to the event loop every 256 KB so
+ * the UI stays responsive on phones. */
+const SHA_K = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+]);
+
+async function sha256Pure(buf, onProgress) {
+  const bytes = new Uint8Array(buf);
+  const len = bytes.length;
+  const bitLen = len * 8;
+  const padLen = (len + 9 + 63) & ~63;
+  const padded = new Uint8Array(padLen);
+  padded.set(bytes);
+  padded[len] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padLen - 8, Math.floor(bitLen / 0x100000000));
+  dv.setUint32(padLen - 4, bitLen >>> 0);
+
+  const H = new Uint32Array([
+    0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+    0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19
+  ]);
+  const W = new Uint32Array(64);
+  const rotr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
+
+  let blocksSinceYield = 0;
+  for (let chunk = 0; chunk < padLen; chunk += 64) {
+    for (let i = 0; i < 16; i++) W[i] = dv.getUint32(chunk + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(W[i-15], 7) ^ rotr(W[i-15], 18) ^ (W[i-15] >>> 3);
+      const s1 = rotr(W[i-2], 17) ^ rotr(W[i-2], 19) ^ (W[i-2] >>> 10);
+      W[i] = (W[i-16] + s0 + W[i-7] + s1) >>> 0;
+    }
+    let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + SHA_K[i] + W[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+      h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+    }
+    H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+    H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+
+    if (++blocksSinceYield >= 4096) {
+      blocksSinceYield = 0;
+      if (onProgress) onProgress((chunk + 64) / padLen);
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
-  return null; // caller should keep the manual field
+
+  let hex = '';
+  for (let i = 0; i < 8; i++) hex += H[i].toString(16).padStart(8, '0');
+  return hex;
 }
 
-function bindFile(fileId, shaId, metaId) {
+async function sha256Hex(buf, onProgress) {
+  // Try native crypto.subtle first — much faster when available. Falls back
+  // to pure-JS in non-secure contexts (the recovery page over plain HTTP).
+  try {
+    if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+      const h = await crypto.subtle.digest('SHA-256', buf);
+      return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+  } catch (_) { /* fall through */ }
+  return await sha256Pure(buf, onProgress);
+}
+
+function updateUploadButton() {
+  const appReady = $('appFile').dataset.sha;
+  const uiReady  = $('uiFile').dataset.sha;
+  $('uploadAll').disabled = !(appReady && uiReady);
+}
+
+function bindFile(fileId, metaId) {
   $(fileId).addEventListener('change', async () => {
-    const f = $(fileId).files[0];
+    const el = $(fileId);
+    delete el.dataset.sha;
+    updateUploadButton();
+    const f = el.files[0];
     if (!f) { $(metaId).textContent = ''; return; }
-    $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes — computing SHA…`;
-    const buf = await f.arrayBuffer();
-    const hex = await sha256Hex(buf);
-    if (hex) { $(shaId).value = hex; $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes`; }
-    else      { $(metaId).textContent = `${f.name} — ${f.size.toLocaleString()} bytes — paste SHA-256 manually`; }
+    const sizeStr = f.size.toLocaleString();
+    $(metaId).textContent = `${f.name} — ${sizeStr} bytes — computing SHA…`;
+    try {
+      const buf = await f.arrayBuffer();
+      const hex = await sha256Hex(buf, p => {
+        $(metaId).textContent = `${f.name} — ${sizeStr} bytes — computing SHA (${Math.round(p * 100)}%)…`;
+      });
+      // The user may have picked a different file while we were hashing.
+      if (el.files[0] !== f) return;
+      el.dataset.sha = hex;
+      $(metaId).textContent = `${f.name} — ${sizeStr} bytes`;
+      updateUploadButton();
+    } catch (e) {
+      $(metaId).textContent = `${f.name} — SHA failed: ${e.message}`;
+    }
   });
 }
 
-bindFile('appFile', 'appSha', 'appMeta');
-bindFile('uiFile',  'uiSha',  'uiMeta');
+bindFile('appFile', 'appMeta');
+bindFile('uiFile',  'uiMeta');
 
-function upload(endpoint, file, sha, progId, logId) {
+function uploadFile(endpoint, file, sha, onPct) {
   return new Promise((resolve, reject) => {
-    if (!file) return reject(new Error('pick a file first'));
-    if (!/^[0-9a-f]{64}$/.test(sha)) return reject(new Error('SHA-256 must be 64 lowercase hex chars'));
-
     const xhr = new XMLHttpRequest();
+    let uploadComplete = false;
+    let fallbackTimer = null;
+    let settled = false;
+    const done = (ok, v) => {
+      if (settled) return;
+      settled = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      ok ? resolve(v) : reject(v);
+    };
+
     xhr.open('POST', endpoint);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.setRequestHeader('X-Sha256', sha);
     xhr.setRequestHeader('X-Size',   String(file.size));
 
-    $(progId).hidden = false;
-    xhr.upload.onprogress = e => { if (e.lengthComputable) $(progId).value = (e.loaded / e.total) * 100; };
-    xhr.onload = () => {
-      $(progId).hidden = true;
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try { resolve(JSON.parse(xhr.responseText)); } catch { resolve({}); }
-      } else reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || xhr.statusText}`));
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onPct((e.loaded / e.total) * 100); };
+    xhr.upload.onload = () => {
+      // Body fully uploaded; device is now erasing + writing flash. iOS
+      // Safari and Chrome over plain-HTTP local AP occasionally never
+      // deliver the server's response to the XHR after the multi-second
+      // server-side pause (observed even though the device logs ESP_OK).
+      // Fall through after 120 s — the bytes are on the device and the
+      // commit step will verify and reboot.
+      uploadComplete = true;
+      onPct(100);
+      fallbackTimer = setTimeout(() => {
+        try { xhr.abort(); } catch (_) {}
+        done(true, { assumed: true });
+      }, 120000);
     };
-    xhr.onerror = () => { $(progId).hidden = true; reject(new Error('network error')); };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { done(true, JSON.parse(xhr.responseText)); } catch { done(true, {}); }
+      } else done(false, new Error(`HTTP ${xhr.status}: ${xhr.responseText || xhr.statusText}`));
+    };
+    xhr.onerror = () => {
+      // Same fallback: if the upload body had finished sending, trust the
+      // device-side state and let commit be the final arbiter.
+      if (uploadComplete) done(true, { assumed: true });
+      else done(false, new Error('network error'));
+    };
     xhr.send(file);
   });
 }
 
-$('appUp').addEventListener('click', async () => {
-  $('appUp').disabled = true; log('appLog', 'uploading…');
-  try {
-    const r = await upload('/api/ota/upload-app', $('appFile').files[0], $('appSha').value.trim().toLowerCase(), 'appProg', 'appLog');
-    log('appLog', r.skipped ? `skipped (existing SHA matched)` : `wrote ${r.written?.toLocaleString() ?? '?'} bytes`, 'ok');
-  } catch (e) { log('appLog', e.message, 'err'); }
-  finally     { $('appUp').disabled = false; }
-});
+$('uploadAll').addEventListener('click', async () => {
+  const appFile = $('appFile').files[0];
+  const uiFile  = $('uiFile').files[0];
+  const appSha  = $('appFile').dataset.sha;
+  const uiSha   = $('uiFile').dataset.sha;
 
-$('uiUp').addEventListener('click', async () => {
-  $('uiUp').disabled = true; log('uiLog', 'uploading…');
-  try {
-    const r = await upload('/api/ota/upload-ui', $('uiFile').files[0], $('uiSha').value.trim().toLowerCase(), 'uiProg', 'uiLog');
-    log('uiLog', r.skipped ? `skipped (existing SHA matched)` : `wrote ${r.written?.toLocaleString() ?? '?'} bytes`, 'ok');
-  } catch (e) { log('uiLog', e.message, 'err'); }
-  finally     { $('uiUp').disabled = false; }
-});
+  if (!appFile || !uiFile || !appSha || !uiSha) {
+    log('uploadLog', 'Wait for both files to finish hashing.', 'err');
+    return;
+  }
 
-$('commit').addEventListener('click', async () => {
-  $('commit').disabled = true; log('commitLog', 'committing…');
+  $('uploadAll').disabled = true;
+  $('uploadProg').hidden = false;
+  $('uploadProg').value = 0;
   try {
+    log('uploadLog', 'Uploading app.bin…');
+    await uploadFile('/api/ota/upload-app', appFile, appSha, p => $('uploadProg').value = p * 0.5);
+    log('uploadLog', 'Uploading storage.bin…');
+    await uploadFile('/api/ota/upload-ui', uiFile, uiSha, p => $('uploadProg').value = 50 + p * 0.5);
+    log('uploadLog', 'Committing…');
     const r = await fetch('/api/ota/commit', { method: 'POST' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-    log('commitLog', 'committed — device rebooting. Reload in ~5 s.', 'ok');
-  } catch (e) { log('commitLog', e.message, 'err'); $('commit').disabled = false; }
+    if (!r.ok) throw new Error(`commit failed: HTTP ${r.status}: ${await r.text()}`);
+    log('uploadLog', 'Success! Device rebooting — reloading in 3 s…', 'ok');
+    setTimeout(() => location.reload(), 3000);
+  } catch (e) {
+    log('uploadLog', e.message, 'err');
+    updateUploadButton();
+    $('uploadProg').hidden = true;
+  }
 });
 
 $('bootMain').addEventListener('click', async () => {
@@ -343,8 +464,20 @@ $('bootMain').addEventListener('click', async () => {
   try {
     const r = await fetch('/api/ota/boot-main', { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-    log('bootLog', 'rebooting into main app. Reload in ~5 s.', 'ok');
+    log('bootLog', 'rebooting into main app…', 'ok');
+    setTimeout(() => location.reload(), 3000);
   } catch (e) { log('bootLog', e.message, 'err'); $('bootMain').disabled = false; }
+});
+
+$('resetBtn').addEventListener('click', async () => {
+  if (!confirm('Factory Reset?\n\nThis will erase all paired cameras and settings, then restart the controller. This cannot be undone.')) return;
+  $('resetBtn').disabled = true; log('resetLog', 'resetting…');
+  try {
+    const r = await fetch('/api/factory-reset', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    log('resetLog', 'NVS erased — device rebooting…', 'ok');
+    setTimeout(() => location.reload(), 3000);
+  } catch (e) { log('resetLog', e.message, 'err'); $('resetBtn').disabled = false; }
 });
 
 // Sequence so loadChannel can check the OTA URL fields populated by loadVersion.
