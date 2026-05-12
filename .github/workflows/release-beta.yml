@@ -1,11 +1,11 @@
 name: release-beta
 
-# Manual trigger from the Actions tab. Each click produces the next beta in
-# sequence: VERSION file holds the next planned stable line (e.g. "0.2.0"),
-# and the run number provides the suffix -> v0.2.0-beta.7.
+# Manual trigger from the Actions tab. Reads the VERSION file and publishes
+# v<VERSION> as a prerelease, then moves the latest-beta floating tag to it.
 #
-# Switch the trigger to `push: branches: [main]` if you want every push to main
-# to cut a beta automatically.
+# Bump VERSION before each run - if v<VERSION> already exists, the workflow
+# refuses to overwrite it. Beta and stable use the same binary; promotion is
+# a pure pointer move (see release-promote.yml).
 
 on:
   workflow_dispatch:
@@ -19,13 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute version
+      - name: Resolve version from VERSION file
         id: ver
         run: |
-          BASE=$(cat VERSION)
-          VERSION="${BASE}-beta.${{ github.run_number }}"
+          VERSION=$(cat VERSION)
+          TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION"     >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::${{ steps.ver.outputs.tag }} already exists. Bump VERSION and commit before cutting another release."
+            exit 1
+          fi
 
       - name: Stamp version into sdkconfig.defaults
         run: |
@@ -59,15 +68,14 @@ jobs:
             --release-notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.ver.outputs.tag }}" \
             --output release/manifest.json
 
-      - name: Create immutable beta release
-        # Preserves the exact build for traceability; promote workflow checks
-        # this tag out and rebuilds from the same SHA with a clean version.
+      - name: Create immutable release
+        # Prerelease=true until release-promote.yml flips it to stable.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.ver.outputs.tag }}" \
             --title "${{ steps.ver.outputs.tag }}" \
-            --notes "Auto-built beta from \`${GITHUB_SHA::7}\`." \
+            --notes "Built from \`${GITHUB_SHA::7}\`. Not yet promoted to stable." \
             --target "$GITHUB_SHA" \
             --prerelease \
             release/manifest.json release/app.bin release/storage.bin release/recovery.bin

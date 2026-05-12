@@ -71,14 +71,16 @@ static esp_err_t handler_version(httpd_req_t *req)
     read_recovery_version(recovery, sizeof(recovery));
     ota_io_get_channel(channel, sizeof(channel));
 
-    char buf[512];
+    char buf[640];
     snprintf(buf, sizeof(buf),
              "{\"app\":\"%s\",\"ui\":\"%s\",\"recovery\":\"%s\","
              "\"channel\":\"%s\",\"running_partition\":\"%s\","
              "\"mode\":\"main\","
+             "\"build_date\":\"%s\",\"build_time\":\"%s\","
              "\"ota_base_url\":\"%s\",\"ota_repo_path\":\"%s\"}",
              app->version, app->version, recovery, channel,
              running ? running->label : "unknown",
+             app->date, app->time,
              CONFIG_OTA_BASE_URL, CONFIG_OTA_REPO_PATH);
     send_json(req, buf);
     return ESP_OK;

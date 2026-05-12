@@ -31,6 +31,7 @@ let panelInited = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     els.appVersion      = document.getElementById('upd-app-version');
+    els.buildStamp      = document.getElementById('upd-build-stamp');
     els.recoveryVersion = document.getElementById('upd-recovery-version');
     els.channelSelect   = document.getElementById('upd-channel-select');
     els.checkBtn        = document.getElementById('upd-check-btn');
@@ -63,6 +64,9 @@ async function loadPanel() {
     if (version) {
         els.appVersion.textContent      = version.app || 'unknown';
         els.recoveryVersion.textContent = version.recovery || 'unknown';
+        els.buildStamp.textContent      = (version.build_date && version.build_time)
+            ? `${version.build_date} ${version.build_time}`
+            : '—';
         if (version.ota_base_url && version.ota_repo_path) {
             baseUrl  = version.ota_base_url;
             repoPath = version.ota_repo_path;
