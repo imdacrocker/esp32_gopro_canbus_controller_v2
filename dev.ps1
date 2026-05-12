@@ -9,7 +9,7 @@
 #   .\dev.ps1 -App recovery build            # build the recovery app
 #   .\dev.ps1 -App recovery flash-usb        # build + USB-flash recovery to factory slot
 #   .\dev.ps1 -ip 10.71.79.1 ...             # override target IP (default = SoftAP IP)
-#   .\dev.ps1 -port COM7 ...                 # override serial port
+#   .\dev.ps1 -port COM7 ...                 # override serial port (default: auto-detect)
 #
 # OTA flow (`flash`, `all`) is main-app only — recovery has no storage.bin and is
 # only reflashed over USB. See tools\flash_factory.ps1 for full board provisioning.
@@ -21,10 +21,35 @@ param(
     [Parameter(Position=0)] [string]$cmd = "all",
     [ValidateSet("main","recovery")] [string]$App = "main",
     [string]$ip   = "10.71.79.1",
-    [string]$port = "COM3"
+    [string]$port
 )
 
 $ErrorActionPreference = "Stop"
+
+# Auto-detect the ESP32 serial port by USB VID/PID, the same way the ESP-IDF
+# VS Code extension does. Matches the ESP32-S3 native USB-JTAG/Serial device
+# plus the two USB-UART bridges commonly found on ESP32 devkits.
+function Get-EspPort {
+    $candidates = Get-PnpDevice -Class Ports -Status OK -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.InstanceId -match 'VID_303A&PID_1001' -or  # ESP32-S3 native USB
+            $_.InstanceId -match 'VID_10C4&PID_EA60' -or  # CP210x
+            $_.InstanceId -match 'VID_1A86'                # CH340
+        }
+    $ports = foreach ($d in $candidates) {
+        if ($d.FriendlyName -match '\((COM\d+)\)') { $matches[1] }
+    }
+    if (-not $ports) { throw "No ESP32 serial port detected. Plug in the board or pass -port COMn." }
+    if ($ports.Count -gt 1) {
+        Write-Host "Multiple ESP boards found ($($ports -join ', ')); using $($ports[0]). Pass -port to override."
+    }
+    return $ports[0]
+}
+
+function Resolve-Port {
+    if (-not $script:port) { $script:port = Get-EspPort }
+    return $script:port
+}
 
 $repo = $PSScriptRoot
 $proj = Join-Path $repo "apps\$App"
@@ -38,7 +63,7 @@ $ui      = Join-Path $proj "build\storage.bin"   # main-only
 $usbOffset = if ($App -eq "main") { "0xE0000" } else { "0x20000" }
 
 function Build   { idf.py -C $proj build }
-function Monitor { idf.py -C $proj -p $port monitor }
+function Monitor { idf.py -C $proj -p (Resolve-Port) monitor }
 
 function Sha256OfFile($path) {
     return (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
@@ -82,8 +107,9 @@ function FlashOta {
 
 function FlashUsb {
     Build
-    Write-Host "USB-flashing $App app to $usbOffset on $port ..."
-    python -m esptool --chip esp32s3 -p $port -b 921600 write_flash $usbOffset $bin
+    $p = Resolve-Port
+    Write-Host "USB-flashing $App app to $usbOffset on $p ..."
+    python -m esptool --chip esp32s3 -p $p -b 921600 write_flash $usbOffset $bin
 }
 
 switch ($cmd) {
