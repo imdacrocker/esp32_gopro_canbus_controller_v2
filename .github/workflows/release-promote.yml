@@ -20,7 +20,21 @@ permissions:
 jobs:
   promote:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Debug — print effective token permissions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Token scopes (via gh auth status):"
+          gh auth status || true
+          echo
+          echo "Token via API headers (look for x-oauth-scopes / x-accepted-github-permissions):"
+          curl -sI -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}" \
+            | grep -iE '^(x-oauth-scopes|x-accepted-github-permissions|x-ratelimit-resource)' || true
+
       - name: Verify source release and resolve its commit
         id: src
         env:
