@@ -23,18 +23,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Debug — print effective token permissions
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Token scopes (via gh auth status):"
-          gh auth status || true
-          echo
-          echo "Token via API headers (look for x-oauth-scopes / x-accepted-github-permissions):"
-          curl -sI -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}" \
-            | grep -iE '^(x-oauth-scopes|x-accepted-github-permissions|x-ratelimit-resource)' || true
-
       - name: Verify source release and resolve its commit
         id: src
         env:
@@ -84,8 +72,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest-stable --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          # --prerelease on the floating pointer: the real stable release is
+          # the immutable vX.Y.Z tag (which release-promote flipped out of
+          # prerelease above). The floating tag is plumbing for the Cloudflare
+          # Worker, not a user-facing release. Marking it prerelease also
+          # sidesteps a GitHub-side restriction that blocks the bot token from
+          # creating new "Latest" releases (only prereleases work).
           gh release create latest-stable \
             --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
             --title "Latest stable (${{ steps.src.outputs.tag }})" \
             --notes "Floating tag for \`${{ steps.src.outputs.tag }}\`." \
             --target "${{ steps.src.outputs.commit }}" \
