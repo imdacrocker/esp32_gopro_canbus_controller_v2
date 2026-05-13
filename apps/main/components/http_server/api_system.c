@@ -167,6 +167,7 @@ static esp_err_t handler_reboot(httpd_req_t *req)
 {
     send_json(req, "{}");
     vTaskDelay(pdMS_TO_TICKS(100));
+    esp_ota_mark_app_valid_cancel_rollback();   /* ignore ESP_ERR_NOT_SUPPORTED on factory */
     esp_restart();
     return ESP_OK;
 }
