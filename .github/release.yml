@@ -1,0 +1,46 @@
+# Configures GitHub's auto-generated release notes.
+# Triggered when a release is created with `gh release create --generate-notes`
+# or via the "Generate release notes" button in the GitHub UI.
+#
+# PRs are grouped by label. Apply one of the labels below to each PR
+# (e.g. `gh pr edit --add-label fix`) and they will appear under the
+# matching section in the release body.
+
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+
+  categories:
+    - title: New features
+      labels:
+        - feat
+        - feature
+        - enhancement
+
+    - title: Bug fixes
+      labels:
+        - fix
+        - bug
+
+    - title: Performance
+      labels:
+        - perf
+
+    - title: Documentation
+      labels:
+        - docs
+
+    - title: Internal changes
+      labels:
+        - chore
+        - refactor
+        - ci
+        - test
+        - build
+        - dependencies
+
+    # Catch-all for unlabelled PRs so nothing silently disappears.
+    - title: Other changes
+      labels:
+        - "*"
