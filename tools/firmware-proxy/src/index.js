@@ -27,12 +27,18 @@ const CORS_HEADERS = {
 function launchpadToml(origin) {
   return `esp_toml_version = 1.0
 firmware_images_url = "${origin}${GITHUB_REPO_PATH}/releases/download/latest-stable/"
-supported_apps = ["gopro_controller"]
+supported_apps = ["GoPro CAN-Bus Controller"]
 
-[gopro_controller]
+[GoPro CAN-Bus Controller]
 chipsets = ["ESP32-S3"]
-image.esp32-s3 = "factory.bin"
-description = "ESP32 GoPro CAN-Bus Controller. After flashing, power-cycle the board. It will come up as WiFi SoftAP HERO-RC-XXXXXX (open). Join it and open http://10.71.79.1/ to add cameras and adjust settings."
+image.esp32s3 = "factory.bin"
+readme.text = """
+Fresh-board provisioning for the ESP32 GoPro CAN-Bus Controller.
+
+After flashing, power-cycle the board. It will come up as WiFi SoftAP
+\`HERO-RC-XXXXXX\` (open, no password). Join it and open http://10.71.79.1/
+to add cameras and adjust settings.
+"""
 `;
 }
 
