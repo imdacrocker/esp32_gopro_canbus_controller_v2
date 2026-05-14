@@ -65,9 +65,76 @@ Then on your phone or laptop:
 2. Open **<http://10.71.79.1/>** in a browser.
 3. Set your UTC offset from the settings menu at the top right.
 4. Add cameras from the Add/Manage cameras menu at the bottom.
-5. Enjoy!
+
 
 > **No internet on the flashing machine?** Download `factory.bin` from the [latest release](https://github.com/imdacrocker/esp32_gopro_controller/releases/latest) and use Launchpad's **DIY** tab to flash it at address `0x0`.
+>
+
+To set up your RaceCapture, you must use Lua to send the isLogging and the UTC.  Here is an example of a full Lua code:
+
+```lua
+local function isLeapYear(year)
+    return (year % 4 == 0 and year % 100 ~= 0) or (year % 400 == 0)
+end
+
+-- Days per month lookup (non-leap year)
+local DAYS_IN_MONTH = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+
+local function daysInMonth(month, year)
+    if month == 2 and isLeapYear(year) then
+        return 29
+    end
+    return DAYS_IN_MONTH[month]
+end
+
+local function dateToEpochMs(year, month, day, hour, minute, second, ms)
+    -- Accumulate full years since epoch
+    local days = 0
+    for y = 1970, year - 1 do
+        days = days + (isLeapYear(y) and 366 or 365)
+    end
+
+    -- Accumulate full months in the current year
+    for m = 1, month - 1 do
+        days = days + daysInMonth(m, year)
+    end
+
+    -- Add remaining days in current month (day is 1-based)
+    days = days + (day - 1)
+
+    -- Convert everything to milliseconds and add sub-second component
+    local totalMs = ((days * 86400) + (hour * 3600) + (minute * 60) + second) * 1000 + ms
+    return totalMs
+end
+
+local function packUint64LE(val)
+    local b = {}
+    for i = 1, 8 do
+        b[i] = math.floor(val % 256)
+        val  = math.floor(val / 256)
+    end
+    return b
+end
+
+function sendUtc()
+    local year, month, day, hour, minute, second, ms = getDateTime()
+
+    if year <= 1970 then
+        return
+    end
+
+    local epochMs = dateToEpochMs(year, month, day, hour, minute, second, ms)
+    local data    = packUint64LE(epochMs)
+
+    txCAN(0, 0x602, 0, data)
+end
+
+setTickRate(50)
+function onTick()
+    sendUtc()
+    txCAN(0, 0x600, 0, {isLogging(), 0, 0, 0, 0, 0, 0, 0}) -- Send the isLogging
+end
+```
 
 
 Full instructions, manual builds, and recovery flows are in [`docs/development.md`](docs/development.md).
