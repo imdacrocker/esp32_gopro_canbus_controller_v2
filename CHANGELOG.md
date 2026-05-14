@@ -10,6 +10,10 @@ sections below. Each release section corresponds to a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Fixed:
+
+CAN controller now automatically recovers from bus-off (e.g. when the device boots before the rest of the vehicle bus is powered up) instead of requiring a reboot.
+
 ## [1.0.2] - 2026-05-12
 
 ### Fixed
