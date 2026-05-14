@@ -6,6 +6,38 @@ When the RaceCapture starts logging, your GoPros start recording. When it stops,
 
 ---
 
+## Quick start
+
+For a brand-new board (one-time provisioning):
+
+1. Connect your ESP32-CAN-X2 to your computer via USB-C.
+2. Open ESP Launchpad pre-configured for this firmware (Chromium-based browser):
+
+   <a href="https://espressif.github.io/esp-launchpad/?flashConfigURL=https://firmware-proxy.imdacrocker.workers.dev/launchpad.toml">
+     <img alt="Try it with ESP Launchpad" src="https://espressif.github.io/esp-launchpad/assets/try_with_launchpad.png" width="250" height="70">
+   </a>
+
+3. Click **Connect** and pick the serial port the board enumerated on.
+4. Click **Flash** — the merged factory image (bootloader + partition table + recovery + main app + UI) is written in one pass.
+5. When flashing finishes, power-cycle the board.
+
+That's it for USB. The board boots straight into the main app.
+
+Then on your phone or laptop:
+
+1. Join the WiFi network **`HERO-RC-XXXXXX`** (open, no password — last 3 MAC bytes in the SSID).
+2. Open **<http://10.71.79.1/>** in a browser.
+3. Set your UTC offset from the settings menu at the top right.
+4. Add cameras from the Add/Manage cameras menu at the bottom.
+5. Enjoy!
+
+> **No internet on the flashing machine?** Download `factory.bin` from the [latest release](https://github.com/imdacrocker/esp32_gopro_controller/releases/latest) and use Launchpad's **DIY** tab to flash it at address `0x0`.
+
+
+Full instructions, manual builds, and recovery flows are in [`docs/development.md`](docs/development.md).
+
+---
+
 ## Features
 
 - **Four GoPros in parallel** — mix any camera combination from Hero2 (with Wifi BackPack) up to a Her13 black.
@@ -39,38 +71,6 @@ The device runs a SoftAP at `10.71.79.1`. You join it from a phone or laptop and
 ```
 
 Full architecture, components, boot order, core affinity, and radio coexistence are in [`docs/architecture.md`](docs/architecture.md).
-
----
-
-## Quick start
-
-For a brand-new board (one-time provisioning):
-
-1. Connect your ESP32-CAN-X2 to your computer via USB-C.
-2. Open ESP Launchpad pre-configured for this firmware (Chromium-based browser):
-
-   <a href="https://espressif.github.io/esp-launchpad/?flashConfigURL=https://firmware-proxy.imdacrocker.workers.dev/launchpad.toml">
-     <img alt="Try it with ESP Launchpad" src="https://espressif.github.io/esp-launchpad/assets/try_with_launchpad.png" width="250" height="70">
-   </a>
-
-3. Click **Connect** and pick the serial port the board enumerated on.
-4. Click **Flash** — the merged factory image (bootloader + partition table + recovery + main app + UI) is written in one pass.
-5. When flashing finishes, power-cycle the board.
-
-That's it for USB. The board boots straight into the main app.
-
-Then on your phone or laptop:
-
-1. Join the WiFi network **`HERO-RC-XXXXXX`** (open, no password — last 3 MAC bytes in the SSID).
-2. Open **<http://10.71.79.1/>** in a browser.
-3. Set your UTC offset from the settings menu at the top right.
-4. Add cameras from the Add/Manage cameras menu at the bottom.
-5. Enjoy!
-
-> **No internet on the flashing machine?** Download `factory.bin` from the [latest release](https://github.com/imdacrocker/esp32_gopro_controller/releases/latest) and use Launchpad's **DIY** tab to flash it at address `0x0`.
-
-
-Full instructions, manual builds, and recovery flows are in [`docs/development.md`](docs/development.md).
 
 ---
 
