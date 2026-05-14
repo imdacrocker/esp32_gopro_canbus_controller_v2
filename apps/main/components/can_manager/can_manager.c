@@ -116,6 +116,17 @@ static esp_timer_handle_t s_tx_timer;
 static esp_timer_handle_t s_watchdog_timer;
 static esp_timer_handle_t s_utc_save_timer;
 static TaskHandle_t       s_rx_task_handle;
+static TaskHandle_t       s_recovery_task_handle;
+
+/* Forwards bus-state transitions from the on_state_change ISR to the
+ * recovery task in task context.  Items are twai_state_change_event_data_t. */
+static QueueHandle_t      s_state_queue;
+
+/* TX gate: cleared while the node is in BUS_OFF (or recovering), set
+ * otherwise.  Single-word writes are atomic on Xtensa LX7, so this is safe
+ * without a lock.  Without this gate, the 5 Hz tx_timer_cb would log
+ * ESP_ERR_INVALID_STATE on every tick once bus-off is entered. */
+static volatile bool      s_can_tx_enabled = true;
 
 /* ---- Watchdog ------------------------------------------------------------- */
 
@@ -293,6 +304,54 @@ static bool IRAM_ATTR on_rx_done_isr(twai_node_handle_t handle,
     return higher_prio_woken == pdTRUE;
 }
 
+/* ---- ISR: on_state_change — bus error-state transitions ------------------ */
+
+/* Fires on every error-FSM transition (ACTIVE/WARNING/PASSIVE/BUS_OFF).
+ * We act on two transitions:
+ *   - entering BUS_OFF: gate TX off and signal the recovery task.
+ *   - leaving BUS_OFF:  re-open the TX gate (recovery completed in hardware).
+ * Other transitions are forwarded to the recovery task for logging. */
+static bool IRAM_ATTR on_state_change_isr(twai_node_handle_t handle,
+                                           const twai_state_change_event_data_t *edata,
+                                           void *user_ctx)
+{
+    if (edata->new_sta == TWAI_ERROR_BUS_OFF) {
+        s_can_tx_enabled = false;
+    } else if (edata->old_sta == TWAI_ERROR_BUS_OFF) {
+        s_can_tx_enabled = true;
+    }
+
+    BaseType_t higher_prio_woken = pdFALSE;
+    xQueueSendFromISR(s_state_queue, edata, &higher_prio_woken);
+    return higher_prio_woken == pdTRUE;
+}
+
+/* ---- Recovery task — initiates twai_node_recover() in task context ------- */
+
+/* twai_node_recover() is documented as a kick-off (non-blocking); the
+ * controller waits for 128*11 consecutive recessive bits before firing
+ * on_state_change again with new_sta != BUS_OFF.  We must call it from a
+ * task because it isn't documented as ISR-safe. */
+static void recovery_task(void *arg)
+{
+    twai_state_change_event_data_t ev;
+    for (;;) {
+        if (!xQueueReceive(s_state_queue, &ev, portMAX_DELAY)) {
+            continue;
+        }
+
+        if (ev.new_sta == TWAI_ERROR_BUS_OFF) {
+            ESP_LOGW(TAG, "TWAI bus-off detected — initiating recovery");
+            esp_err_t err = twai_node_recover(s_node);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "twai_node_recover: %s", esp_err_to_name(err));
+            }
+        } else if (ev.old_sta == TWAI_ERROR_BUS_OFF) {
+            ESP_LOGI(TAG, "TWAI recovered from bus-off");
+        }
+    }
+}
+
 /* ---- RX task (§14.4 — priority 5, core 1) -------------------------------- */
 
 static void rx_task(void *arg)
@@ -326,6 +385,14 @@ static void rx_task(void *arg)
 
 static void tx_timer_cb(void *arg)
 {
+    /* Skip transmit while the node is in bus-off / recovery — every TX
+     * attempt would otherwise return ESP_ERR_INVALID_STATE and spam the log
+     * at 5 Hz.  Gate is re-opened by on_state_change_isr() once the
+     * controller leaves BUS_OFF. */
+    if (!s_can_tx_enabled) {
+        return;
+    }
+
     uint8_t data[CAMERA_MAX_SLOTS];
     for (int i = 0; i < CAMERA_MAX_SLOTS; i++) {
         data[i] = (uint8_t)camera_manager_get_slot_can_state(i);
@@ -429,8 +496,14 @@ void can_manager_init(void)
     };
     ESP_ERROR_CHECK(twai_new_node_onchip(&node_cfg, &s_node));
 
+    /* Bus-state transition queue — depth 4 is plenty: the controller can only
+     * traverse 4 error states, and the recovery task drains immediately. */
+    s_state_queue = xQueueCreate(4, sizeof(twai_state_change_event_data_t));
+    configASSERT(s_state_queue);
+
     twai_event_callbacks_t twai_cbs = {
-        .on_rx_done = on_rx_done_isr,
+        .on_rx_done      = on_rx_done_isr,
+        .on_state_change = on_state_change_isr,
     };
     ESP_ERROR_CHECK(twai_node_register_event_callbacks(s_node, &twai_cbs, NULL));
 
@@ -468,6 +541,12 @@ void can_manager_init(void)
     xTaskCreatePinnedToCore(rx_task, "can_rx", 4096, NULL, 5,
                              &s_rx_task_handle, 1);
     configASSERT(s_rx_task_handle);
+
+    /* Recovery task on core 1, priority 4 — sits below RX so it can never
+     * delay frame dispatch.  Wakes only on bus error-state transitions. */
+    xTaskCreatePinnedToCore(recovery_task, "can_recov", 3072, NULL, 4,
+                             &s_recovery_task_handle, 1);
+    configASSERT(s_recovery_task_handle);
 }
 
 can_logging_state_t can_manager_get_logging_state(void)
