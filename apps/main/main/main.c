@@ -4,7 +4,6 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
-#include "esp_timer.h"
 #include "wifi_manager.h"
 #include "ble_core.h"
 #include "camera_manager.h"
@@ -18,35 +17,24 @@ static const char *TAG = "main";
 
 /* ---- OTA rollback disarm (§11) ------------------------------------------ *
  * After an OTA commit, the bootloader marks the new app PENDING_VERIFY. If
- * the app crashes (or never calls mark_valid_cancel_rollback) before the
- * next reset, the bootloader auto-reverts to factory (recovery). Arming a
- * 30 s timer here gives us confidence the new app is stable before
- * disarming the rollback. Returns ESP_ERR_NOT_SUPPORTED when running from
- * the factory partition — that's the recovery app, not relevant.
+ * the app never calls mark_valid_cancel_rollback before the next reset,
+ * the bootloader auto-reverts to the previous slot. We disarm rollback as
+ * soon as http_server_init() returns — httpd serving = "healthy enough"
+ * given the closed CAN-bus threat model. A timer-based soak was overkill
+ * and lost the dev-loop race against the USB-UART reset triggered when
+ * idf.py monitor attaches post-OTA.
+ *
+ * Returns ESP_ERR_NOT_SUPPORTED when running from the factory partition
+ * (recovery app) — silent no-op in that case.
  */
-static void rollback_timer_cb(void *arg)
+static void mark_ota_valid(void)
 {
-    (void)arg;
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "OTA rollback disarmed — app marked valid");
-    } else if (err == ESP_ERR_NOT_SUPPORTED) {
-        /* running from factory; no rollback to cancel */
-    } else {
+        ESP_LOGI(TAG, "OTA image marked valid (rollback disarmed)");
+    } else if (err != ESP_ERR_NOT_SUPPORTED) {
         ESP_LOGW(TAG, "mark_app_valid_cancel_rollback: %s", esp_err_to_name(err));
     }
-}
-
-static void arm_rollback_timer(void)
-{
-    static esp_timer_handle_t timer;
-    const esp_timer_create_args_t args = {
-        .callback        = rollback_timer_cb,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name            = "rollback_arm",
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
-    ESP_ERROR_CHECK(esp_timer_start_once(timer, 30ULL * 1000 * 1000));  /* 30 s */
 }
 
 /* ---- CAN callbacks ------------------------------------------------------- */
@@ -139,9 +127,8 @@ void app_main(void)
      * TCP-only — does not touch the radio, safe to do before BLE. */
     http_server_init();
 
-    /* Arm the OTA rollback-disarm timer (§11). 30 s of survival + httpd
-     * up = "looks healthy enough to keep." */
-    arm_rollback_timer();
+    /* Disarm OTA rollback (§11). httpd up = "healthy enough." */
+    mark_ota_valid();
 
     /* Starts the NimBLE host task. on_sync fires async and begins scanning.
      * Deferred until after the AP beacon is on-air (see comment above). */

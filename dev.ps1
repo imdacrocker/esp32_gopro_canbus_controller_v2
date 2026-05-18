@@ -62,7 +62,17 @@ $ui      = Join-Path $proj "build\storage.bin"   # main-only
 # USB-flash offset: main goes to ota_0, recovery to factory.
 $usbOffset = if ($App -eq "main") { "0xE0000" } else { "0x20000" }
 
-function Build   { idf.py -C $proj build }
+function Build {
+    # Force __DATE__/__TIME__ in esp_app_desc to refresh every build.
+    # ESP-IDF v6.0.1's esp_app_format/CMakeLists.txt has no force-rebuild
+    # rule on esp_app_desc.c, so incremental builds reuse the cached .obj
+    # and the embedded compile timestamp stays stale — defeating the
+    # "Built" row in the web UI as a flash-took-effect signal.
+    $appDescObj = Join-Path $proj `
+        "build\esp-idf\esp_app_format\CMakeFiles\__idf_esp_app_format.dir\esp_app_desc.c.obj"
+    if (Test-Path $appDescObj) { Remove-Item -Force $appDescObj }
+    idf.py -C $proj build
+}
 function Monitor { idf.py -C $proj -p (Resolve-Port) monitor }
 
 function Sha256OfFile($path) {

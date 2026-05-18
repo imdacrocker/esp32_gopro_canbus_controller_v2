@@ -64,4 +64,4 @@ build/
 /apps/recovery/.vscode
 /apps/main/.vscode
 
-release/
+/release/

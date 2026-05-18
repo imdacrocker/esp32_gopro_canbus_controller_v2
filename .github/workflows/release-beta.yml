@@ -68,12 +68,20 @@ jobs:
             --release-notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.ver.outputs.tag }}" \
             --output release/manifest.json
 
+      - name: Stamp ota_data_initial to select ota_0
+        # IDF emits ota_data_initial.bin as all-0xFF, which the bootloader
+        # interprets as "boot factory" when a factory partition exists.
+        # Rewrite it to a valid seq=1 entry so first boot lands in the
+        # main app instead of recovery.
+        run: |
+          python tools/release/make_factory_otadata.py apps/main/build/ota_data_initial.bin
+
       - name: Merge factory image
         # One-shot image flashable at 0x0 — what ESP Launchpad and
         # flash_factory.ps1 consume for fresh-board provisioning. Layout
-        # mirrors partitions.csv; ota_data_initial.bin makes the device
-        # land in the main app on first boot (factory recovery still
-        # serves as the bootloader's failsafe).
+        # mirrors partitions.csv; the stamped ota_data_initial.bin above
+        # makes the device land in the main app on first boot (factory
+        # recovery still serves as the bootloader's failsafe).
         run: |
           python -m pip install --quiet esptool
           python -m esptool --chip esp32s3 merge-bin \
@@ -94,6 +102,7 @@ jobs:
           gh release create "${{ steps.ver.outputs.tag }}" \
             --title "${{ steps.ver.outputs.tag }}" \
             --notes "Built from \`${GITHUB_SHA::7}\`. Not yet promoted to stable." \
+            --generate-notes \
             --target "$GITHUB_SHA" \
             --prerelease \
             release/manifest.json release/app.bin release/storage.bin release/recovery.bin release/factory.bin

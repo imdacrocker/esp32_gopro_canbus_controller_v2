@@ -62,13 +62,23 @@ jobs:
             --pattern 'factory.bin'
 
       - name: Flip source release out of prerelease
+        # Preserve the auto-generated changelog from the beta release and
+        # append a promotion footer, rather than overwriting it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          EXISTING=$(gh release view "${{ steps.src.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          {
+            echo "$EXISTING"
+            echo ""
+            echo "---"
+            echo "Promoted to stable on $(date -u +%Y-%m-%d)."
+          } > "$RUNNER_TEMP/notes.md"
           gh release edit "${{ steps.src.outputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" \
             --prerelease=false \
-            --notes "Built from \`${{ steps.src.outputs.commit }}\`. Promoted to stable on $(date -u +%Y-%m-%d)."
+            --notes-file "$RUNNER_TEMP/notes.md"
 
       - name: Move latest-stable floating tag
         # Floating tag is what the Cloudflare Worker proxies to the device.

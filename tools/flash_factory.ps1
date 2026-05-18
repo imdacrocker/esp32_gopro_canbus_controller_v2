@@ -15,12 +15,40 @@
 #
 # Requires the IDF environment to be sourced first:
 #   & 'C:\esp\v6.0.1\esp-idf\export.ps1'
+#
+# Serial port auto-detected by USB VID/PID — pass -port COMn to override.
 
 param(
-    [string]$port = "COM3"
+    [string]$port
 )
 
 $ErrorActionPreference = "Stop"
+
+# Auto-detect the ESP32 serial port by USB VID/PID — same matcher used by
+# dev.ps1 (and by the ESP-IDF VS Code extension under the hood). Covers the
+# ESP32-S3 native USB-JTAG/Serial device plus the two USB-UART bridges
+# commonly fitted to ESP32 devkits.
+function Get-EspPort {
+    $candidates = Get-PnpDevice -Class Ports -Status OK -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.InstanceId -match 'VID_303A&PID_1001' -or  # ESP32-S3 native USB
+            $_.InstanceId -match 'VID_10C4&PID_EA60' -or  # CP210x
+            $_.InstanceId -match 'VID_1A86'                # CH340
+        }
+    $ports = @(foreach ($d in $candidates) {
+        if ($d.FriendlyName -match '\((COM\d+)\)') { $matches[1] }
+    })
+    if (-not $ports) { throw "No ESP32 serial port detected. Plug in the board or pass -port COMn." }
+    if ($ports.Count -gt 1) {
+        Write-Host "Multiple ESP boards found ($($ports -join ', ')); using $($ports[0]). Pass -port to override."
+    }
+    return $ports[0]
+}
+
+function Resolve-Port {
+    if (-not $script:port) { $script:port = Get-EspPort }
+    return $script:port
+}
 
 $mainProj = Resolve-Path (Join-Path $PSScriptRoot "..\apps\main")
 $recProj  = Resolve-Path (Join-Path $PSScriptRoot "..\apps\recovery")
@@ -36,10 +64,17 @@ idf.py -C $recProj  build
 
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 
+# IDF emits ota_data_initial.bin as all-0xFF, which the bootloader
+# interprets as "boot factory" when a factory partition exists. Rewrite
+# it to a valid seq=1 entry so first-boot lands in ota_0 (main app).
+Write-Host "Stamping ota_data_initial.bin to select ota_0"
+python "$PSScriptRoot\release\make_factory_otadata.py" `
+    (Join-Path $mainBld "ota_data_initial.bin")
+
 # Partition layout (see partitions.csv at repo root):
 #   0x000000  bootloader.bin
 #   0x008000  partition-table.bin
-#   0x00F000  ota_data_initial.bin   — points the bootloader at ota_0
+#   0x00F000  ota_data_initial.bin   — stamped above to select ota_0
 #   0x020000  recovery (factory)     — 768 KB
 #   0x0E0000  main app (ota_0)       — 1.69 MB
 #   0x290000  storage (LittleFS)     — 3 MB
@@ -55,8 +90,9 @@ python -m esptool --chip esp32s3 merge-bin `
     0x0E0000 (Join-Path $mainBld "esp32_gopro_canbus_controller_v2.bin") `
     0x290000 (Join-Path $mainBld "storage.bin")
 
-Write-Host "Flashing $port ..."
-python -m esptool --chip esp32s3 -p $port -b 921600 write_flash 0x0 $factory
+$p = Resolve-Port
+Write-Host "Flashing $p ..."
+python -m esptool --chip esp32s3 -p $p -b 921600 write-flash 0x0 $factory
 
 Write-Host ""
 Write-Host "Factory provisioning complete. Power-cycle the board."
