@@ -135,8 +135,12 @@ static const uint8_t RC_PKT_CV[13] = {
 #define RC_WOL_RETRY_INTERVAL_MS    2000   /* per-slot WoL retry period */
 #define RC_STATUS_POLL_INTERVAL_MS  5000   /* global UDP status-poll period */
 
-/* WoL retry is armed when no response received for this long. */
-#define RC_KEEPALIVE_SILENCE_MS     10000
+/* WoL retry is armed when no response received for this long.  Set just
+ * above 2× the keepalive interval so the silence check arms on the second
+ * tick (~6 s post-associate) rather than the fourth (~12 s).  Going below
+ * the keepalive interval would arm before the camera has had any chance
+ * to answer the first keepalive. */
+#define RC_KEEPALIVE_SILENCE_MS     5000
 
 /* ---- HTTP timeouts ------------------------------------------------------- */
 

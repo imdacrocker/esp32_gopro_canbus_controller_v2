@@ -1389,7 +1389,7 @@ WiFi Remote Control emulation driver for the GoPro "Smart Remote" UDP protocol, 
 |---|---|
 | Implement `camera_driver_t` vtable | `start_recording`, `stop_recording`, `get_recording_status` |
 | Station lifecycle | React to L2 associate / DHCP / disassociate events from `wifi_manager` |
-| WoL on associate without DHCP | Send magic packet × 5; retry every 2 s if camera silent for > 10 s |
+| WoL on associate without DHCP | Send magic packet × 5; retry every 2 s if camera silent for > 5 s |
 | UDP keepalive | `_GPHD_:0:0:2:0.000000\n` unicast, every 3 s — fire-and-forget |
 | UDP status poll | Binary `st` opcode every 5 s; response parsed for power + recording state |
 | UDP shutter | Binary `SH` opcode (param 0x02 / 0x00). Broadcast to `255.255.255.255:8484` × 3 for "fire all" (CAN / Start All); unicast to `ctx->last_ip:8484` × 1 for the mismatch poll and per-slot web-UI commands |
@@ -1532,7 +1532,7 @@ typedef struct {
 
     TickType_t                last_response_tick;    /* refreshed by RX on any datagram */
     esp_timer_handle_t        keepalive_timer;       /* 3 s periodic */
-    esp_timer_handle_t        wol_retry_timer;       /* 2 s periodic; armed on > 10 s silence */
+    esp_timer_handle_t        wol_retry_timer;       /* 2 s periodic; armed on > 5 s silence */
 } gopro_wifi_rc_ctx_t;
 ```
 
@@ -1836,7 +1836,7 @@ No active scanning. The SoftAP handles discovery by virtue of the camera connect
 - `last_ip` known: send WoL magic packet x5, prime with a keepalive, arm the 3 s keepalive timer. The first received UDP datagram drives `CMD_PROMOTE` -> `WIFI_CAM_READY`.
 - `last_ip` unknown (never connected before): log warning, take no further action. If the camera wakes and requests a DHCP lease, `CMD_STATION_DHCP` fires and the normal flow resumes.
 
-**Keepalive silence > 10 s (WoL retry):** If no UDP datagram (keepalive ACK, `st`, `SH`, or `cv` reply) arrives within 10 s of the timer being armed, a 2 s WoL-retry timer fires repeatedly — sending WoL x5 followed by a keepalive each cycle — until traffic resumes. On entry to the silence state the driver also calls `camera_manager_on_camera_unresponsive()`, which demotes `wifi_status` from `WIFI_CAM_READY` to `WIFI_CAM_PROBING` and stops the mismatch poll. The slot remains `wifi_associated == true` (it has not left the AP), so the http_server reports its status as `"connecting"` rather than `"disconnected"`. The next received UDP datagram drives `CMD_PROMOTE` again, which calls `camera_manager_on_camera_ready()` and restores `WIFI_CAM_READY`.
+**Keepalive silence > 5 s (WoL retry):** If no UDP datagram (keepalive ACK, `st`, `SH`, or `cv` reply) arrives within 5 s of the timer being armed, a 2 s WoL-retry timer fires repeatedly — sending WoL x5 followed by a keepalive each cycle — until traffic resumes. On entry to the silence state the driver also calls `camera_manager_on_camera_unresponsive()`, which demotes `wifi_status` from `WIFI_CAM_READY` to `WIFI_CAM_PROBING` and stops the mismatch poll. The slot remains `wifi_associated == true` (it has not left the AP), so the http_server reports its status as `"connecting"` rather than `"disconnected"`. The next received UDP datagram drives `CMD_PROMOTE` again, which calls `camera_manager_on_camera_ready()` and restores `WIFI_CAM_READY`.
 
 **Station disassociates:** Slot returns to `WIFI_CAM_NONE` immediately. Keepalive and WoL-retry timers are disarmed. No further traffic is sent until the camera re-associates.
 
