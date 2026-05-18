@@ -27,7 +27,20 @@ sections below. Each release section corresponds to a `vX.Y.Z` tag on `main`.
   user can re-upload the web UI from recovery's embedded form without
   needing serial access.
 
+### Fixed
+- **Hero4 cameras (WiFi RC mode) now reconnect reliably after an ESP32
+  reboot.** Previously the per-slot periodic keepalive was silently
+  no-op'd after a reboot because the driver's cached IP wasn't seeded
+  from the persisted slot record, and the WoL retry watchdog couldn't
+  arm because its silence reference was never initialised. The slot
+  would sit waiting until the camera happened to transmit on its own —
+  often several minutes. Reconnect now typically completes within
+  seconds of the camera re-associating.
+
 ### Changed
+- **WoL retry watchdog now arms after 5 s of silence (was 10 s).** Halves
+  the worst-case time before the driver starts sending wake-on-LAN
+  bursts at an associated-but-unresponsive Hero4.
 - **Settings menu reorganized.** Logging controls, Restart-to-Recovery,
   and other power-user controls moved into a new **Advanced Settings**
   modal. The "App version / Built / Recovery" rows moved into the new

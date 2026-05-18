@@ -111,7 +111,16 @@ void rc_handle_station_associated(const uint8_t mac[6])
     }
 
     /* Camera is associating with a known cached IP (reuse from previous session).
-     * It may be asleep; send WoL, prime with a keepalive, and arm the timer. */
+     * It may be asleep; send WoL, prime with a keepalive, and arm the timer.
+     *
+     * Seed ctx->last_ip from the NVS-cached value so the periodic keepalive
+     * timer has a destination — ctx_create() zeroed it at boot, and on this
+     * path station_dhcp won't fire to populate it (the camera kept its lease).
+     * Seed last_response_tick to now so the keepalive_tick silence watchdog
+     * has a reference point and can arm the WoL retry timer if the camera
+     * stays unresponsive past RC_KEEPALIVE_SILENCE_MS. */
+    ctx->last_ip            = ip;
+    ctx->last_response_tick = xTaskGetTickCount();
     ESP_LOGI(TAG, "slot %d: associated (no DHCP), sending WoL burst", slot);
     rc_send_wol(ip, ctx->mac);
     rc_send_keepalive(ip);
