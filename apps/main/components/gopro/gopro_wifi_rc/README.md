@@ -7,13 +7,13 @@ Implements `camera_driver_t` for GoPro cameras using the legacy "WiFi Smart Remo
 ## Responsibilities
 
 - **Station lifecycle**: track GoPro cameras as they associate, get a DHCP lease, and disconnect.
-- **Wake-on-LAN**: broadcast magic packet bursts when an associated camera goes silent for > 10 s.
+- **Wake-on-LAN**: broadcast magic packet bursts when an associated camera goes silent for > 5 s.
 - **UDP keepalive**: send `_GPHD_:0:0:2:0.000000\n` to each camera every 3 s (fire-and-forget).
 - **UDP status poll**: send binary `st` to each camera with a known IP every 5 s; parse the response for power + recording state.
 - **UDP shutter**: send binary `SH` packets (param 0x02 / 0x00). The driver exposes both per-slot unicast (mismatch poll, manual single-camera web-UI command) and a broadcast variant to `255.255.255.255:8484` × 3 (used by `set_desired_recording_all`); see "Shutter dispatch" below.
 - **UDP camera-version (`cv`) identify**: sent at pair time and on every keepalive tick until the camera responds; reply is a length-prefixed firmware string + model name. Drives `gopro_model_from_name()` to set the slot's model with no HTTP involvement. The slot's name field is left blank — there is no known WiFi RC protocol path to retrieve the user-set camera name. Verified on real Hero7 hardware (response: `HD7.01.01.90.00` / `HERO7 Black`).
 - **HTTP date/time** (best-effort): URL-encoded hex bytes; gated on `gopro_model_supports_http_datetime()`. No-op on every model except Hero4 Black/Silver until other models' STA-side HTTP is verified.
-- **Liveness watchdog**: trigger WoL retry if `last_response_tick` ages past 10 s.
+- **Liveness watchdog**: trigger WoL retry if `last_response_tick` ages past 5 s.
 
 ---
 
@@ -200,8 +200,8 @@ keepalive_timer fires every 3 s (per slot, armed after association)
   → if !identify_attempted:
        rc_send_cv(ip)                  — re-probe model until camera answers
   → check last_response_tick age
-      age < 10 s    → if wol_retry_timer armed: disarm
-      age >= 10 s   → arm wol_retry_timer
+      age < 5 s     → if wol_retry_timer armed: disarm
+      age >= 5 s    → arm wol_retry_timer
 
 wol_retry_timer fires every 2 s
   → rc_send_wol(ip, mac)               — magic packet broadcast burst
