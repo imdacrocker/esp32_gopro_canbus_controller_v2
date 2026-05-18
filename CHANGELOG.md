@@ -10,6 +10,24 @@ sections below. Each release section corresponds to a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- **Fresh installs from `factory.bin` (ESP Launchpad / `flash_factory.ps1`)
+  now boot directly into the main app instead of recovery.** ESP-IDF
+  emits `ota_data_initial.bin` as blank, which the bootloader interprets
+  as "boot factory (= recovery)" when a factory partition is present.
+  The release pipeline and local provisioning script now stamp it with
+  a valid otadata entry that selects `ota_0` on first boot. Recovery
+  remains reachable via the rollback fallback and the "Restart to
+  Recovery" button.
+- **OTA updates apply reliably on first reboot, even with a serial
+  monitor attached.** The new image is marked valid as soon as the HTTP
+  server is serving, rather than after a 30-second soak. The old soak
+  window raced with the USB-UART reset triggered by `idf.py monitor`
+  attaching after an OTA push — the new image would boot, then get
+  rolled back to the previous version before the timer fired. The
+  shortened semantics are acceptable given the project's threat model
+  (closed CAN bus, no PII — see `docs/design/ota.md` §4).
+
 ## [1.0.5] - 2026-05-16
 
 ### Added

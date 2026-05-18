@@ -385,7 +385,7 @@ The `available` list is hardcoded for now. Compile-time flag `CONFIG_OTA_ALLOW_D
 **Goal:** make rollback work reliably, and make the daily dev loop fast.
 
 **Deliverables:**
-- `main.c` change: 30-second one-shot `esp_timer` after `http_server_init()` returns; on fire, calls `esp_ota_mark_app_valid_cancel_rollback()`. (If the function returns `ESP_ERR_NOT_SUPPORTED`, that means the running partition is `factory` — no-op, ignore.)
+- `main.c` change: call `esp_ota_mark_app_valid_cancel_rollback()` synchronously right after `http_server_init()` returns. httpd serving = "healthy enough" given the threat model (closed CAN bus, no PII). An earlier design used a 30 s `esp_timer` soak but it lost the dev-loop race against the USB-UART reset triggered when `idf.py monitor` attaches post-OTA — the new image would get rolled back before the timer fired. (If the function returns `ESP_ERR_NOT_SUPPORTED`, that means the running partition is `factory` — no-op, ignore.)
 - `dev.ps1` in repo root with subcommands `build`, `flash` (OTA, default), `flash-usb`, `monitor`, `all`. Source in Appendix B.
 - `tools/flash_factory.ps1` — one-shot USB provisioning. Source in Appendix C.
 
@@ -685,8 +685,11 @@ python -m esptool --chip esp32s3 -p $port -b 921600 write_flash `
     0x0A0000 "$main\esp32_gopro_canbus_controller_v2.bin" `
     0x290000 "$main\storage.bin"
 
-# otadata is left blank — bootloader picks ota_0 because it's valid;
-# falls back to factory (recovery) if ota_0 ever fails.
+# NOTE: this appendix is an early sketch; the live script lives at
+# tools/flash_factory.ps1 and additionally stamps ota_data_initial.bin
+# (via tools/release/make_factory_otadata.py) so the bootloader picks
+# ota_0 on first boot. A blank otadata makes the bootloader default to
+# factory (= recovery) when a factory partition is present.
 Write-Host "Factory provisioning complete. Power-cycle the board."
 ```
 

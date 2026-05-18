@@ -47,7 +47,7 @@ For a brand-new board, or after `python -m esptool erase_flash`, use the full pr
 .\tools\flash_factory.ps1
 ```
 
-This builds both apps and writes everything over USB at correct offsets: bootloader, partition table, `ota_data_initial` (so the bootloader picks `ota_0` immediately), recovery into `factory`, main app into `ota_0`, and the LittleFS web UI into `storage`. `ota_1` is left blank for the first OTA to populate.
+This builds both apps and writes everything over USB at correct offsets: bootloader, partition table, a stamped `ota_data_initial` that selects `ota_0` (so the bootloader lands in the main app on first boot, not recovery — IDF emits the file blank by default and a blank otadata makes the bootloader default to factory), recovery into `factory`, main app into `ota_0`, and the LittleFS web UI into `storage`. `ota_1` is left blank for the first OTA to populate.
 
 ---
 
